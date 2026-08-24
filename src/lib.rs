@@ -380,32 +380,22 @@ impl Flock {
         STR
     }
 
-    /// Build trail line-segment geometry into the persistent scratch buffers.
-    /// Faithful port of the JS buildTrails(): same depth schedule, dot stride,
-    /// alpha ramp, and segment pairing. `palette` is the active mode's colours
-    /// as packed [r,g,b] f32 triples (up to 8 entries). `pal_len` is the active
-    /// swatch count, passed by the JS caller (which knows the active palette
-    /// set's width). Returns the vertex count.
-    pub fn build_trail_geometry(&mut self, palette: &[f32], pal_len: usize) -> u32 {
+    /// Build complete trails for at most `max_trails` dots into persistent
+    /// scratch buffers. Sample prefixes are stable as the budget changes.
+    pub fn build_trail_geometry(
+        &mut self,
+        palette: &[f32],
+        pal_len: usize,
+        max_trails: usize,
+    ) -> u32 {
         let n = self.sim.n;
-        let hlen = self.sim.trail_len();
-        let head = self.sim.trail_head();
-        let depth = if n > 20000 {
-            8
-        } else if n > 5000 {
-            12
-        } else if n > 1000 {
-            22
-        } else {
-            TRAIL
-        }
-        .min(hlen);
-        if depth <= 2 {
+        let depth = self.sim.trail_len().min(TRAIL);
+        let selected = max_trails.min(n);
+        if depth < 2 || selected == 0 {
             return 0;
         }
-        let stride = n.div_ceil(3000);
-        let max_dots = n.div_ceil(stride);
-        let max_verts = max_dots * depth * 2;
+        let head = self.sim.trail_head();
+        let max_verts = selected * (depth - 1) * 2;
         if self.trail_verts.len() < max_verts * 5 {
             self.trail_verts = vec![0.0; max_verts * 5];
             self.trail_cols = vec![0.0; max_verts * 4];
@@ -420,8 +410,9 @@ impl Flock {
         }
         let mut vp = 0usize;
         let mut cp = 0usize;
+        let stride = trail_sample_stride(n);
         let mut i = 0usize;
-        while i < n {
+        for _ in 0..selected {
             let ci = (colors[i] as usize) % pal_len;
             let (r, g, b) = (palette[ci * 3], palette[ci * 3 + 1], palette[ci * 3 + 2]);
             let mut prev = [0.0f32; 5];
@@ -451,7 +442,7 @@ impl Flock {
                 prev = cur;
                 have = true;
             }
-            i += stride;
+            i = (i + stride) % n;
         }
         (vp / 5) as u32
     }
@@ -531,6 +522,21 @@ fn clone_params(p: &CamParams) -> CamParams {
     }
 }
 
+fn trail_sample_stride(n: usize) -> usize {
+    let mut stride = ((n as f64 * 0.618_033_988_75).round() as usize).max(1);
+    while gcd(stride, n) != 1 {
+        stride += 1;
+    }
+    stride
+}
+
+fn gcd(mut a: usize, mut b: usize) -> usize {
+    while b != 0 {
+        (a, b) = (b, a % b);
+    }
+    a
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -558,8 +564,8 @@ mod tests {
         for _ in 0..4 {
             flock.step();
         }
-        assert_eq!(flock.build_trail_geometry(&[], 1), 0);
-        assert_eq!(flock.build_trail_geometry(&[1.0, 0.0], 1), 0);
+        assert_eq!(flock.build_trail_geometry(&[], 1, 3), 0);
+        assert_eq!(flock.build_trail_geometry(&[1.0, 0.0], 1, 3), 0);
     }
 
     #[test]
@@ -579,6 +585,42 @@ mod tests {
                 assert_ne!(flock.cam.pitch, initial_pitch);
             }
         }
+    }
+
+    #[test]
+    fn trail_budget_builds_complete_stable_samples() {
+        let mut flock = Flock::new(11, 3, 42);
+        for _ in 0..TRAIL {
+            flock.step();
+        }
+        let palette = [1.0, 0.5, 0.25];
+        let vertices_per_trail = 2 * (TRAIL - 1);
+
+        assert_eq!(flock.build_trail_geometry(&palette, 1, 0), 0);
+        assert_eq!(
+            flock.build_trail_geometry(&palette, 1, 4),
+            (4 * vertices_per_trail) as u32
+        );
+        assert_eq!(
+            flock.build_trail_geometry(&palette, 1, flock.n()),
+            (flock.n() * vertices_per_trail) as u32
+        );
+
+        let stride = trail_sample_stride(flock.n());
+        let order: Vec<_> = (0..flock.n())
+            .scan(0, |index, _| {
+                let current = *index;
+                *index = (*index + stride) % flock.n();
+                Some(current)
+            })
+            .collect();
+        let mut sorted = order.clone();
+        sorted.sort_unstable();
+        assert_eq!(sorted, (0..flock.n()).collect::<Vec<_>>());
+        assert_eq!(
+            &order[..4],
+            &[0, stride, stride * 2 % flock.n(), stride * 3 % flock.n()]
+        );
     }
 }
 

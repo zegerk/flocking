@@ -3,6 +3,12 @@
 // All per-dot projection happens in the vertex shader (tour / manual 4D-5D
 // chain / centroid-fit / perspective). Trails, links, marks, floor too.
 
+import {
+  calculateTrailBudget,
+  nextTrailQuality,
+  trailQualityLabel,
+} from './trail-quality.mjs';
+
 // ---- palettes ----
 // Four named sets. Each set supplies the four mode palettes:
 //   palette (mode 0, len 5), comps (mode 1, len 8), ramp (mode 2,
@@ -380,7 +386,7 @@ function graphViews(){
 // ---- GL buffer helpers: size once, update with bufferSubData ----
 function ensureBufferSize(buf,bytes){
   gl.bindBuffer(gl.ARRAY_BUFFER,buf);
-  if(buf._size!==bytes){gl.bufferData(gl.ARRAY_BUFFER,bytes,gl.DYNAMIC_DRAW);buf._size=bytes;}
+  if((buf._size||0)<bytes){gl.bufferData(gl.ARRAY_BUFFER,bytes,gl.DYNAMIC_DRAW);buf._size=bytes;}
 }
 
 function uploadDots(){
@@ -406,11 +412,26 @@ function uploadDots(){
 // camera / outside the slab (the shader teleports culled verts offscreen, which
 // does NOT break a strip). Segments let us drop a culled point cleanly by
 // repeating its predecessor, collapsing that segment to zero length.
-// Trails are built in Rust (same depth/stride/alpha math as the old JS path);
-// here we only upload the scratch buffers from wasm memory.
+// Rust builds complete trails for a stable, adaptively sized sample; here we
+// only upload the persistent scratch buffers from wasm memory.
+let trailQuality=1,trailEffective=1,trailCeiling=1,trailObserve=true;
+
+function resetTrailAdaptation(resetQuality){
+  if(resetQuality)trailQuality=1;
+  trailObserve=true;
+  fpsWindowStart=0;fpsFrames=0;
+}
+
+function trailBudget(){
+  const {selected,effective,ceiling}=calculateTrailBudget(flock.n(),trailQuality,flock.trail_slots());
+  trailEffective=effective;
+  trailCeiling=ceiling;
+  return selected;
+}
+
 function buildTrails(){
-  if(!P.trails) return 0;
-  const count=flock.build_trail_geometry(palFloats(colMode), palLen(colMode));
+  if(!P.trails){trailEffective=0;return 0;}
+  const count=flock.build_trail_geometry(palFloats(colMode),palLen(colMode),trailBudget());
   if(count===0) return 0;
   const verts=f32view(flock.trail_verts_ptr(),count*5);
   const vc=f32view(flock.trail_cols_ptr(),count*4);
@@ -527,7 +548,18 @@ function draw(){
 }
 
 // ---- readouts ----
-let prevSpread=0, acc=0, fpsFrames=0, fpsT0=0;
+let prevSpread=0,acc=0,fpsFrames=0,fpsWindowStart=0,measuredFps=0;
+function updateFrameRate(now){
+  if(!fpsWindowStart){fpsWindowStart=now;fpsFrames=0;return;}
+  fpsFrames++;
+  const elapsed=now-fpsWindowStart;
+  if(elapsed<1000)return;
+  measuredFps=fpsFrames*1000/elapsed;
+  fpsWindowStart=now;fpsFrames=0;
+  if(!P.trails)return;
+  if(trailObserve){trailObserve=false;return;}
+  trailQuality=nextTrailQuality(trailQuality,trailEffective,measuredFps,flock.n(),trailCeiling);
+}
 function readout(){
   E('r-step').textContent=Number(flock.steps()).toLocaleString();
   const s=flock.spread();
@@ -540,9 +572,8 @@ function readout(){
   if(s<1e-3)v='collapsed';else if(g>1.02)v='expanding';else if(g<0.98)v='contracting';
   E('r-verdict').textContent=v;
   prevSpread=s;
-  const now=performance.now();
-  if(fpsT0)E('r-fps').textContent=Math.round(fpsFrames*1000/(now-fpsT0));
-  fpsFrames=0;fpsT0=now;
+  E('r-fps').textContent=measuredFps?Math.round(measuredFps):'—';
+  E('r-trails').textContent=trailQualityLabel(P.trails,trailEffective);
 }
 
 const swatches=(arr,caps)=>arr.map((c,i)=>'<span class="key"><i style="background:'+c+'"></i>'+caps[i]+'</span>').join('');
@@ -613,7 +644,7 @@ function setDim(d){
 }
 
 // ---- loop ----
-function loop(){
+function loop(now=performance.now()){
   if(running){
     const sp=+E('s-speed').value;
     for(let s=0;s<sp;s++)flock.step();
@@ -621,7 +652,7 @@ function loop(){
   }
   flock.update_camera(cv.width,cv.height);
   draw();
-  fpsFrames++;
+  updateFrameRate(now);
   if(++acc%6===0){readout();if(colMode!==0)legend();}
   requestAnimationFrame(loop);
 }
@@ -649,7 +680,7 @@ function wire(){
     const want=dotsFor(+e.target.value);
     E('v-dots').textContent=want;
     clearTimeout(dotsTimer);
-    dotsTimer=setTimeout(()=>{flock.set_n(want);refreshViews();uploadDots();},90);
+    dotsTimer=setTimeout(()=>{flock.set_n(want);refreshViews();uploadDots();resetTrailAdaptation(true);},90);
   });
 
   E('m-prop').onclick=()=>setLaw(true);
@@ -660,7 +691,7 @@ function wire(){
   E('d-5').onclick=()=>setDim(5);
 
   E('k-fit').onchange=e=>flock.set_fit(e.target.checked);
-  E('k-trail').onchange=e=>P.trails=e.target.checked;
+  E('k-trail').onchange=e=>{P.trails=e.target.checked;resetTrailAdaptation(e.target.checked);readout();};
   E('k-links').onchange=e=>P.links=e.target.checked;
   E('k-spin').onchange=e=>flock.set_spin(e.target.checked);
   E('k-round').onchange=e=>{flock.set_round(e.target.checked);roundU=e.target.checked?1:0;};
@@ -717,6 +748,10 @@ function wire(){
   },{passive:false});
   if('ResizeObserver' in window)new ResizeObserver(size).observe(E('stage'));
   addEventListener('resize',size);
+  document.addEventListener('visibilitychange',()=>{
+    if(!document.hidden){resetTrailAdaptation(false);}
+    else{fpsWindowStart=0;fpsFrames=0;}
+  });
 }
 
 function start(){
