@@ -1,4 +1,5 @@
-export const TRAIL_VERTEX_BUDGET = 250000;
+export const TRAIL_GEOMETRY_BYTE_BUDGET = 256 * 1024 * 1024;
+const TRAIL_VERTEX_BYTES = (5 + 4) * 4 * 2;
 export const TRAIL_FPS_FLOOR = 10;
 export const TRAIL_FPS_RECOVER = 12;
 export const TRAIL_HISTORY_BYTE_BUDGET = 256 * 1024 * 1024;
@@ -35,7 +36,8 @@ export function calculateTrailBudget(population, requestedQuality, trailSlots) {
   const count = Math.max(0, Math.floor(population));
   const quality = Math.max(0, Math.min(1, requestedQuality));
   const verticesPerTrail = Math.max(1, (Math.floor(trailSlots) - 1) * 2);
-  const safeCount = Math.floor(TRAIL_VERTEX_BUDGET / verticesPerTrail);
+  const safeVertices = Math.floor(TRAIL_GEOMETRY_BYTE_BUDGET / TRAIL_VERTEX_BYTES);
+  const safeCount = Math.floor(safeVertices / verticesPerTrail);
   const requestedCount = quality >= 1 ? count : Math.floor(count * quality);
   const selected = Math.min(count, requestedCount, safeCount);
   return {

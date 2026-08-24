@@ -32,11 +32,16 @@ test('trail budget starts complete and respects the geometry ceiling', () => {
     effective: 1,
     ceiling: 1,
   });
+  assert.deepEqual(calculateTrailBudget(2178, 1, 120), {
+    selected: 2178,
+    effective: 1,
+    ceiling: 1,
+  });
 
   const large = calculateTrailBudget(1_000_000, 1, 30);
-  assert.equal(large.selected, 4310);
-  assert.equal(large.effective, 0.00431);
-  assert.equal(large.ceiling, 0.00431);
+  assert.equal(large.selected, 64_280);
+  assert.equal(large.effective, 0.06428);
+  assert.equal(large.ceiling, 0.06428);
 });
 
 test('quality controller reduces, holds, restores, and reaches zero', () => {
