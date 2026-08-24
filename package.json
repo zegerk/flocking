@@ -1,0 +1,19 @@
+{
+  "name": "flocking",
+  "description": "A real-time friend-and-enemy swarm simulation for WebGL2 and WebAssembly.",
+  "private": true,
+  "version": "0.1.4",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "scripts": {
+    "dev": "trunk serve",
+    "build": "trunk build --release",
+    "deploy": "npm run build && wrangler deploy",
+    "deploy:env": "set -a && . ./.env && set +a && npm run build && wrangler deploy",
+    "cf:dev": "npm run build && wrangler dev"
+  },
+  "devDependencies": {
+    "wrangler": "^4.125.0"
+  }
+}

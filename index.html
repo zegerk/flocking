@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="An interactive swarm simulation where dots move toward a friend, away from an enemy, and form shifting patterns in up to five dimensions.">
+<title>Friends &amp; Enemies</title>
+<link data-trunk rel="rust" data-wasm-opt="z" />
+<link data-trunk rel="copy-file" href="glue.js" />
+<style>
+  :root{
+    --field:#10171b; --field-2:#0b1114; --rule:#22313a;
+    --ink:#d8ddd6; --muted:#6e8189;
+    --coral:#e8836b; --saffron:#e3c567; --sage:#7fb3a0; --peri:#9aa8d9; --rose:#d98ca8;
+    --mono: ui-monospace, "SF Mono", "Cascadia Mono", "Roboto Mono", Menlo, Consolas, monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%;margin:0}
+  body{background:var(--field-2);color:var(--ink);font-family:var(--mono);font-size:13px;overflow:hidden}
+  #stage{position:fixed;inset:0}
+  canvas{display:block;width:100%;height:100%;touch-action:none;cursor:grab}
+  canvas.dragging{cursor:grabbing}
+
+  #panel{
+    position:fixed;top:0;left:0;bottom:0;width:274px;
+    background:rgba(11,17,20,.86);backdrop-filter:blur(6px);
+    border-right:1px solid var(--rule);padding:20px 18px 18px;
+    overflow-y:auto;display:flex;flex-direction:column;gap:18px;
+    scrollbar-width:thin;
+    scrollbar-color:var(--rule) transparent;
+  }
+  /* Tame the panel's scroll bar: slim, themed, fades until hovered. */
+  #panel::-webkit-scrollbar{width:8px}
+  #panel::-webkit-scrollbar-track{background:transparent}
+  #panel::-webkit-scrollbar-thumb{
+    background:var(--rule);border-radius:4px;border:2px solid transparent;background-clip:padding-box;
+  }
+  #panel::-webkit-scrollbar-thumb:hover{background:var(--muted);background-clip:padding-box}
+  h1{margin:0;font-size:15px;font-weight:500;letter-spacing:.22em;text-transform:uppercase}
+  .rules{margin:0;color:var(--muted);line-height:1.65;font-size:11.5px}
+  .rules b{color:var(--ink);font-weight:500}
+  .group{display:flex;flex-direction:column;gap:11px}
+  .group-head{color:var(--muted);font-size:10px;letter-spacing:.18em;text-transform:uppercase;
+    border-bottom:1px solid var(--rule);padding-bottom:6px}
+  .ctl{display:flex;flex-direction:column;gap:5px}
+  .ctl-top{display:flex;justify-content:space-between;align-items:baseline;gap:8px}
+  .val{color:var(--saffron);font-variant-numeric:tabular-nums}
+
+  input[type=range]{-webkit-appearance:none;appearance:none;width:100%;height:14px;background:transparent;margin:0}
+  input[type=range]::-webkit-slider-runnable-track{height:1px;background:var(--rule)}
+  input[type=range]::-moz-range-track{height:1px;background:var(--rule)}
+  input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;
+    width:9px;height:14px;margin-top:-7px;border:0;border-radius:0;background:var(--ink)}
+  input[type=range]::-moz-range-thumb{width:9px;height:14px;border:0;border-radius:0;background:var(--ink)}
+  input[type=range]:focus-visible{outline:1px solid var(--saffron);outline-offset:4px}
+
+  .seg{display:flex;border:1px solid var(--rule)}
+  .seg button{flex:1;background:transparent;border:0;color:var(--muted);font-family:inherit;
+    font-size:10.5px;letter-spacing:.1em;text-transform:uppercase;padding:8px 4px;cursor:pointer}
+  .seg button + button{border-left:1px solid var(--rule)}
+  .seg button[aria-pressed=true]{background:var(--ink);color:var(--field-2)}
+  .seg button:focus-visible{outline:1px solid var(--saffron);outline-offset:-3px}
+
+  .row{display:flex;gap:8px}
+  .btn{flex:1;background:transparent;border:1px solid var(--rule);color:var(--ink);font-family:inherit;
+    font-size:10.5px;letter-spacing:.1em;text-transform:uppercase;padding:9px 4px;cursor:pointer}
+  .btn:hover{border-color:var(--muted)}
+  .btn:focus-visible{outline:1px solid var(--saffron);outline-offset:2px}
+
+  .check{display:flex;align-items:center;gap:9px;cursor:pointer;color:var(--muted)}
+  .check input{accent-color:var(--sage);width:13px;height:13px}
+  .check:hover{color:var(--ink)}
+
+  select{width:100%;background:transparent;border:1px solid var(--rule);color:var(--ink);
+    font-family:inherit;font-size:11px;padding:7px 6px;border-radius:0}
+  select:focus-visible{outline:1px solid var(--saffron);outline-offset:2px}
+  select option{background:var(--field);color:var(--ink)}
+
+  .readout{display:flex;flex-direction:column;gap:5px;font-size:11px}
+  .readout div{display:flex;justify-content:space-between;color:var(--muted)}
+  .readout b{color:var(--ink);font-weight:500;font-variant-numeric:tabular-nums}
+  .note{color:var(--muted);font-size:10.5px;line-height:1.6;margin:0}
+  .source{border-top:1px solid var(--rule);padding-top:12px;text-align:center}
+  .source a{color:var(--muted);text-decoration:none;text-transform:uppercase;font-size:10px;letter-spacing:.14em}
+  .source a:hover{color:var(--ink)}
+  .source a:focus-visible{outline:1px solid var(--saffron);outline-offset:4px}
+  .key{display:flex;gap:4px;align-items:center;margin:0 0 4px}
+  .key i{display:block;width:16px;height:8px}
+  #panel[data-open=false]{display:none}
+  /* Collapse control: floats over the canvas corner when the panel is hidden;
+     when open it docks just right of the panel so it never covers content. */
+  #toggle{display:block;position:fixed;left:12px;top:12px;z-index:5;background:rgba(11,17,20,.9);
+    border:1px solid var(--rule);color:var(--ink);font-family:inherit;font-size:10.5px;
+    letter-spacing:.1em;text-transform:uppercase;padding:10px 14px;cursor:pointer}
+  #toggle:hover{border-color:var(--muted)}
+  #toggle:focus-visible{outline:1px solid var(--saffron);outline-offset:2px}
+  /* Desktop: dock the control just right of the open panel so it covers nothing. */
+  @media (min-width:761px){
+    #panel[data-open=true] ~ #toggle{left:286px}
+  }
+
+  @media (max-width:760px), (max-height:500px) and (pointer:coarse){
+    html,body{height:100vh;height:100dvh}
+    body{display:grid;min-width:0;min-height:0}
+    #stage{position:relative;inset:auto;min-width:0;min-height:0}
+    #panel{position:relative;inset:auto;min-width:0;min-height:0}
+    #toggle{top:calc(12px + env(safe-area-inset-top));left:calc(12px + env(safe-area-inset-left))}
+  }
+
+  @media (max-width:760px){
+    body{grid-template-rows:minmax(0,1fr) auto}
+    #stage{grid-row:1}
+    #panel{grid-row:2;right:auto;width:auto;max-height:48vh;max-height:48dvh;border-right:0;border-top:1px solid var(--rule);
+      padding:14px calc(16px + env(safe-area-inset-right)) calc(20px + env(safe-area-inset-bottom)) calc(16px + env(safe-area-inset-left))}
+    h1{font-size:13px}
+  }
+
+  @media (max-height:500px) and (pointer:coarse){
+    body{--mobile-panel-width:min(44vw,320px);grid-template-rows:minmax(0,1fr);grid-template-columns:auto minmax(0,1fr)}
+    #stage{grid-row:1;grid-column:2}
+    #panel{grid-row:1;grid-column:1;width:var(--mobile-panel-width);max-height:none;border-top:0;border-right:1px solid var(--rule);
+      padding:calc(14px + env(safe-area-inset-top)) 16px calc(14px + env(safe-area-inset-bottom)) calc(16px + env(safe-area-inset-left))}
+    #panel[data-open=false] ~ #toggle{left:calc(12px + env(safe-area-inset-left))}
+    #panel[data-open=true] ~ #toggle{left:calc(var(--mobile-panel-width) + 12px)}
+  }
+</style>
+</head>
+<body>
+<div id="stage"><canvas id="c"></canvas></div>
+
+<aside id="panel" data-open="true">
+  <div>
+    <h1>Friends &amp; Enemies</h1>
+    <p class="rules">
+      Every dot picks one <b>friend</b> and one <b>enemy</b>, and knows nothing else.
+      Each step it drifts a little toward the centre of the room, takes a <b>large step</b>
+      toward its friend and a <b>small step</b> away from its enemy. Now and then one dot re-picks.
+      The same rules run in <b>2, 3, 4, or 5 dimensions</b> — pick a space with the buttons below.
+      Only three axes are drawn at a time, so in 4D/5D use the <b>turn</b> sliders to swing the
+      hidden axes into view, the <b>slab</b> sliders to slice a section of them, or enable the
+      <b>grand tour</b> to walk through every projection automatically.
+      <b>Drag to orbit, scroll to zoom.</b>
+    </p>
+  </div>
+
+  <div class="group">
+    <div class="group-head">Space</div>
+    <div class="seg" role="group" aria-label="dimensions">
+      <button id="d-2" aria-pressed="false">2d</button>
+      <button id="d-3" aria-pressed="true">3d</button>
+      <button id="d-4" aria-pressed="false">4d</button>
+      <button id="d-5" aria-pressed="false">5d</button>
+    </div>
+    <p class="note">2D holds z at zero and locks the camera face-on. 3D is the full room. In 4D and 5D the extra axes (w, v) are invisible until you swing them in with the turn sliders below, slice them with the slab, or let the grand tour rotate through every projection.</p>
+    <div id="wgroup" style="display:none;flex-direction:column;gap:11px">
+      <div class="ctl">
+        <div class="ctl-top"><span>turn x into w</span><span class="val" id="v-wa"></span></div>
+        <input type="range" id="s-wa" min="0" max="360" step="1" value="0" aria-label="rotation in the x-w plane">
+      </div>
+      <div class="ctl">
+        <div class="ctl-top"><span>turn y into w</span><span class="val" id="v-wb"></span></div>
+        <input type="range" id="s-wb" min="0" max="360" step="1" value="0" aria-label="rotation in the y-w plane">
+      </div>
+      <div class="ctl" id="vrow" style="display:none">
+        <div class="ctl-top"><span>turn z into v</span><span class="val" id="v-wc"></span></div>
+        <input type="range" id="s-wc" min="0" max="360" step="1" value="0" aria-label="rotation in the z-v plane">
+      </div>
+      <label class="check"><input type="checkbox" id="k-tour"> grand tour (ignores the turn sliders)</label>
+      <div class="ctl">
+        <div class="ctl-top"><span>leg length</span><span class="val" id="v-leg"></span></div>
+        <input type="range" id="s-leg" min="1" max="20" step="1" value="7" aria-label="seconds per tour leg">
+      </div>
+      <label class="check"><input type="checkbox" id="k-iso"> isoclinic double turn</label>
+      <label class="check"><input type="checkbox" id="k-wp" checked> perspective on w too</label>
+      <div class="ctl">
+        <div class="ctl-top"><span>slab centre</span><span class="val" id="v-sc"></span></div>
+        <input type="range" id="s-sc" min="-150" max="150" step="1" value="0" aria-label="centre of the w slab">
+      </div>
+      <div class="ctl">
+        <div class="ctl-top"><span>slab width</span><span class="val" id="v-sw"></span></div>
+        <input type="range" id="s-sw" min="2" max="200" step="1" value="200" aria-label="half width of the w slab">
+      </div>
+      <p class="note" id="tour-note"></p>
+      <p class="note">Only three axes can be drawn. The slab keeps a slice of w and drops the rest — sweep the centre to read the fourth axis one section at a time. The two turn sliders instead swing w into view, trading x or y away for it.</p>
+    </div>
+  </div>
+
+  <div class="group">
+    <div class="group-head">Steps</div>
+    <div class="ctl">
+      <div class="ctl-top"><span>toward friend</span><span class="val" id="v-friend"></span></div>
+      <input type="range" id="s-friend" step="0.1" min="0" max="120" value="12" aria-label="step toward friend">
+    </div>
+    <div class="ctl">
+      <div class="ctl-top"><span>away from enemy</span><span class="val" id="v-enemy"></span></div>
+      <input type="range" id="s-enemy" step="0.1" min="0" max="120" value="5" aria-label="step away from enemy">
+    </div>
+    <div class="ctl">
+      <div class="ctl-top"><span>toward centre</span><span class="val" id="v-centre"></span></div>
+      <input type="range" id="s-centre" step="0.1" min="0" max="80" value="4" aria-label="pull toward centre">
+    </div>
+  </div>
+
+  <div class="group">
+    <div class="group-head">Step law</div>
+    <div class="seg" role="group" aria-label="step law">
+      <button id="m-prop" aria-pressed="false">proportional</button>
+      <button id="m-unit" aria-pressed="true">fixed length</button>
+    </div>
+    <p class="note" id="law-note"></p>
+  </div>
+
+  <div class="group">
+    <div class="group-head">Population</div>
+    <div class="ctl">
+      <div class="ctl-top"><span>dots</span><span class="val" id="v-dots">2178</span></div>
+      <input type="range" id="s-dots" min="0" max="1000" value="518" aria-label="number of dots">
+    </div>
+    <div class="ctl">
+      <div class="ctl-top"><span>re-pick every</span><span class="val" id="v-rate"></span></div>
+      <input type="range" id="s-rate" min="1" max="400" value="7" aria-label="mean steps between re-picks">
+    </div>
+    <div class="ctl">
+      <div class="ctl-top"><span>steps per frame</span><span class="val" id="v-speed"></span></div>
+      <input type="range" id="s-speed" min="1" max="24" value="1" aria-label="steps per frame">
+    </div>
+  </div>
+
+  <div class="group">
+    <div class="group-head">View</div>
+    <label class="check"><input type="checkbox" id="k-fit" checked> keep the cloud in frame</label>
+    <label class="check"><input type="checkbox" id="k-trail" checked> draw trails</label>
+    <label class="check"><input type="checkbox" id="k-round" checked> round dots</label>
+    <label class="check"><input type="checkbox" id="k-fog" checked> fade with distance</label>
+    <label class="check"><input type="checkbox" id="k-shadow" checked> cast onto the floor</label>
+    <label class="check"><input type="checkbox" id="k-rock" checked> rock back and forth</label>
+    <label class="check"><input type="checkbox" id="k-spin"> turn slowly on its own</label>
+    <div class="ctl">
+      <div class="ctl-top"><span>lens</span><span class="val" id="v-lens"></span></div>
+      <input type="range" id="s-lens" min="18" max="140" step="1" value="45" aria-label="lens: wide exaggerates depth, long flattens it">
+    </div>
+    <div class="ctl">
+      <div class="ctl-top"><span>opacity</span><span class="val" id="v-opacity"></span></div>
+      <input type="range" id="s-opacity" min="2" max="100" step="1" value="50" aria-label="dot and trail opacity">
+    </div>
+    <label class="check"><input type="checkbox" id="k-links"> draw every relation</label>
+    <div class="ctl">
+      <div class="ctl-top"><span>colour by</span></div>
+      <select id="s-colour" aria-label="colour dots by">
+        <option value="0">nothing (random)</option>
+        <option value="4">speed of motion</option>
+        <option value="1">component</option>
+        <option value="2" selected>steps to its cycle</option>
+        <option value="3">on a cycle or not</option>
+        <option value="5">component's size</option>
+        <option value="6">cycle length</option>
+        <option value="7">popularity (in-degree)</option>
+        <option value="8">birth order</option>
+      </select>
+    </div>
+    <div class="ctl">
+      <div class="ctl-top"><span>colour set</span></div>
+      <select id="s-palette" aria-label="palette set">
+        <option value="0">default (warm-teal)</option>
+        <option value="1">monochrome</option>
+        <option value="2">high-contrast</option>
+        <option value="3" selected>viridis</option>
+        <option value="4">ember</option>
+        <option value="5">ocean</option>
+        <option value="6">aurora</option>
+        <option value="7">sunset</option>
+        <option value="8">forest</option>
+        <option value="9">candy</option>
+      </select>
+    </div>
+    <p class="note" id="legend"></p>
+  </div>
+
+  <div class="row">
+    <button class="btn" id="b-play">Pause</button>
+    <button class="btn" id="b-repick">Re-pick all</button>
+    <button class="btn" id="b-reset">Reset</button>
+  </div>
+  <div class="row">
+    <button class="btn" id="b-view">Reset view</button>
+  </div>
+
+  <div class="readout">
+    <div><span>step</span><b id="r-step">0</b></div>
+    <div><span>spread (room widths)</span><b id="r-spread">0.00</b></div>
+    <div><span>space</span><b id="r-space">3d</b></div>
+    <div><span>view</span><b id="r-view">0° / 0°</b></div>
+    <div><span>tour leg</span><b id="r-leg">—</b></div>
+    <div><span>verdict</span><b id="r-verdict">—</b></div>
+    <div><span>fps</span><b id="r-fps">—</b></div>
+  </div>
+
+  <p class="note">Space pauses. R resets. R with shift re-picks all. H hides this panel. Drag to orbit, scroll to zoom.</p>
+  <div class="source">
+    <a href="https://github.com/zegerk/flocking" target="_blank" rel="noopener noreferrer" aria-label="View Friends and Enemies source code on GitHub">GitHub</a>
+  </div>
+</aside>
+<button id="toggle" aria-expanded="true" aria-controls="panel">Hide</button>
+
+<script>
+  if (matchMedia('(max-width: 760px), (max-height: 500px) and (pointer: coarse)').matches) {
+    document.getElementById('panel').dataset.open = 'false';
+    document.getElementById('toggle').setAttribute('aria-expanded', 'false');
+    document.getElementById('toggle').textContent = 'Rules';
+  }
+</script>
+<script type="module" src="./glue.js"></script>
+</body>
+</html>

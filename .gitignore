@@ -1,0 +1,18 @@
+# Rust build output
+/target
+
+# Trunk build output
+/dist
+
+# Node dependencies
+/node_modules
+
+# Logs
+*.log
+
+# Cloudflare credentials and local state
+.env
+.wrangler/
+
+# Editor state
+.vscode/
