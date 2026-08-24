@@ -73,10 +73,10 @@ npm run deploy:env
 ```
 
 That command loads `.env`, creates an optimised Trunk build, and runs
-`wrangler deploy`. Cloudflare creates the DNS record and certificate for
-<https://flocking.zeger.app>. If the variables are already exported in the
-current shell, use `npm run deploy`. To preview the production build locally
-through Wrangler, use `npm run cf:dev`.
+`wrangler deploy`. To use a custom domain, configure the `routes` section in
+`wrangler.jsonc` before deploying. If the variables are already exported in
+the current shell, use `npm run deploy`. To preview the production build
+locally through Wrangler, use `npm run cf:dev`.
 
 ## Tour of the source
 
