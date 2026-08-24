@@ -10,9 +10,9 @@ squeeze-the-camera grand tour, and per-dot projection live in a small Rust
 [`wasm-bindgen`](https://rustwasm.github.io/wasm-bindgen/); the rAF loop, DOM
 controls, and WebGL2 renderer run in plain JavaScript.
 
-[![Friends & Enemies simulation showing colourful counter-rotating trails](./screenshot.png)](./demo.mp4)
+[![Friends & Enemies simulation showing colourful counter-rotating trails](./screenshot.png)](https://flocking.zeger.app)
 
-[Watch the demo](./demo.mp4)
+https://github.com/user-attachments/assets/1980a444-c766-4fba-845c-53209e72acfa
 
 ## Stack
 
