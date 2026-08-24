@@ -258,7 +258,7 @@ impl Flock {
     }
 
     pub fn orbit(&mut self, dx: f32, dy: f32) {
-        if self.sim.dim != 3 {
+        if self.sim.dim == 2 {
             return;
         }
         self.cam.yaw += dx * 0.006;
@@ -560,6 +560,25 @@ mod tests {
         }
         assert_eq!(flock.build_trail_geometry(&[], 1), 0);
         assert_eq!(flock.build_trail_geometry(&[1.0, 0.0], 1), 0);
+    }
+
+    #[test]
+    fn orbit_rotates_every_spatial_view_except_2d() {
+        for dim in 2..=5 {
+            let mut flock = Flock::new(3, dim, 42);
+            let initial_yaw = flock.cam.yaw;
+            let initial_pitch = flock.cam.pitch;
+
+            flock.orbit(10.0, -5.0);
+
+            if dim == 2 {
+                assert_eq!(flock.cam.yaw, initial_yaw);
+                assert_eq!(flock.cam.pitch, initial_pitch);
+            } else {
+                assert_ne!(flock.cam.yaw, initial_yaw);
+                assert_ne!(flock.cam.pitch, initial_pitch);
+            }
+        }
     }
 }
 
