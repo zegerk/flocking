@@ -5,7 +5,10 @@
 
 import {
   calculateTrailBudget,
+  maxPopulationForTrailLength,
+  maxPopulationSliderValue,
   nextTrailQuality,
+  populationForSliderValue,
   trailQualityLabel,
 } from './trail-quality.mjs';
 
@@ -596,8 +599,7 @@ const P={trails:true,links:false,shadow:true,opacity:0.5};
 let dimVal=3, colMode=0;
 
 // Slider value → dot count. Exponential mapping so 0..1000 covers 3..1,000,000.
-// Hoisted to module scope so both start() and wire() can call it.
-const dotsFor=v=>Math.max(3,Math.round(3*Math.pow(1000000/3,v/1000)));
+const dotsFor=populationForSliderValue;
 
 function labels(){
   const unit=!lawProp;
@@ -614,6 +616,7 @@ function labels(){
   E('v-sc').textContent=(+E('s-sc').value/100).toFixed(2);
   E('v-sw').textContent=(+E('s-sw').value/100)>=2?'everything':'±'+(+E('s-sw').value/100).toFixed(2);
   E('v-leg').textContent=E('s-leg').value+'s';
+  E('v-trail-length').textContent=E('s-trail-length').value+' frames';
   E('v-opacity').textContent=E('s-opacity').value+'%';
   E('law-note').textContent=lawProp
     ?'Step size scales with distance, exactly as written. The update is then linear, so a run either collapses to the centre or grows without bound.'
@@ -648,6 +651,7 @@ function loop(now=performance.now()){
   if(running){
     const sp=+E('s-speed').value;
     for(let s=0;s<sp;s++)flock.step();
+    flock.capture_trail_frame();
     uploadDots();
   }
   flock.update_camera(cv.width,cv.height);
@@ -675,12 +679,39 @@ function wire(){
   bind('s-sc',v=>flock.set_slab_c(v/100));
   bind('s-sw',v=>flock.set_slab_h(v/100));
 
-  let dotsTimer=0;
+  let dotsTimer=0,trailLengthTimer=0;
   E('s-dots').addEventListener('input',e=>{
     const want=dotsFor(+e.target.value);
     E('v-dots').textContent=want;
     clearTimeout(dotsTimer);
-    dotsTimer=setTimeout(()=>{flock.set_n(want);refreshViews();uploadDots();resetTrailAdaptation(true);},90);
+    dotsTimer=setTimeout(()=>{
+      flock.set_n(want);
+      E('v-dots').textContent=flock.n();
+      refreshViews();uploadDots();resetTrailAdaptation(true);
+    },90);
+  });
+
+  E('s-trail-length').addEventListener('input',e=>{
+    const length=+e.target.value;
+    const dots=E('s-dots');
+    const maxPosition=maxPopulationSliderValue(length);
+    dots.max=maxPosition;
+    if(+dots.value>maxPosition){
+      dots.value=maxPosition;
+      E('v-dots').textContent=dotsFor(maxPosition);
+    }
+    labels();
+    clearTimeout(dotsTimer);
+    clearTimeout(trailLengthTimer);
+    trailLengthTimer=setTimeout(()=>{
+      const safePopulation=maxPopulationForTrailLength(length);
+      if(flock.n()>safePopulation){
+        flock.set_n(dotsFor(+dots.value));
+      }
+      flock.set_trail_length(length);
+      E('v-dots').textContent=flock.n();
+      refreshViews();uploadDots();resetTrailAdaptation(true);
+    },90);
   });
 
   E('m-prop').onclick=()=>setLaw(true);
@@ -756,6 +787,7 @@ function wire(){
 
 function start(){
   if(!setupGL())return;
+  E('s-dots').max=maxPopulationSliderValue(+E('s-trail-length').value);
   flock=new window.wasmBindings.Flock(dotsFor(+E('s-dots').value),3,BigInt(Date.now())>>8n);
   flock.sync_colors();
   refreshViews();
@@ -765,6 +797,7 @@ function start(){
   flock.set_centre(+E('s-centre').value/1000);
   flock.set_repick(+E('s-rate').value);
   flock.set_speed(+E('s-speed').value);
+  flock.set_trail_length(+E('s-trail-length').value);
   flock.set_lens(+E('s-lens').value/100);
   flock.set_slab_h(+E('s-sw').value/100);
   size();

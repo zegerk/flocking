@@ -1,6 +1,35 @@
 export const TRAIL_VERTEX_BUDGET = 250000;
 export const TRAIL_FPS_FLOOR = 10;
 export const TRAIL_FPS_RECOVER = 12;
+export const TRAIL_HISTORY_BYTE_BUDGET = 256 * 1024 * 1024;
+export const MIN_TRAIL_FRAMES = 2;
+export const MAX_TRAIL_FRAMES = 120;
+export const MAX_POPULATION = 1_000_000;
+
+export function populationForSliderValue(value) {
+  const position = Math.max(0, Math.min(1000, Math.floor(value)));
+  return Math.max(3, Math.round(3 * Math.pow(MAX_POPULATION / 3, position / 1000)));
+}
+
+export function maxPopulationForTrailLength(frames) {
+  const length = Math.max(MIN_TRAIL_FRAMES, Math.min(MAX_TRAIL_FRAMES, Math.floor(frames)));
+  return Math.min(
+    MAX_POPULATION,
+    Math.max(3, Math.floor(TRAIL_HISTORY_BYTE_BUDGET / (length * 5 * 4))),
+  );
+}
+
+export function maxPopulationSliderValue(frames) {
+  const limit = maxPopulationForTrailLength(frames);
+  let low = 0;
+  let high = 1000;
+  while (low < high) {
+    const middle = Math.ceil((low + high) / 2);
+    if (populationForSliderValue(middle) <= limit) low = middle;
+    else high = middle - 1;
+  }
+  return low;
+}
 
 export function calculateTrailBudget(population, requestedQuality, trailSlots) {
   const count = Math.max(0, Math.floor(population));

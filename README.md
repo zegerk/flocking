@@ -106,8 +106,9 @@ The dock on the left (see `index.html`) exposes:
   couple of single-tone themes.
 - **Camera** — rock, spin, auto-fit, lens/fog toggles, manual 4D-5D chain.
 - **Trails / links / floor / shadows** — drawn by the JS renderer from per-frame
-  geometry produced in wasm. Trails use their complete history and are sampled
-  automatically only when needed to keep the simulation responsive.
+  geometry produced in wasm. Trail length is adjustable from 2 to 120 rendered
+  frames; complete trails are sampled automatically only when needed to keep
+  the simulation responsive. Longer trails lower the maximum safe population.
 
 ## Inspiration
 

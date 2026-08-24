@@ -4,14 +4,25 @@
 use crate::rng::Rng;
 use crate::tour::{Tour, AMB};
 
-pub const TRAIL: usize = 30;
 pub const STR: usize = 5;
+pub const MIN_TRAIL_FRAMES: usize = 2;
+pub const DEFAULT_TRAIL_FRAMES: usize = 30;
+pub const MAX_TRAIL_FRAMES: usize = 120;
+pub const TRAIL_HISTORY_BYTE_BUDGET: usize = 256 * 1024 * 1024;
 const MIN_POPULATION: usize = 3;
+const MAX_POPULATION: usize = 1_000_000;
 const MIN_DIMENSION: u32 = 2;
 const MAX_DIMENSION: u32 = AMB as u32;
 
-fn normalize_population(n: usize) -> usize {
+pub fn max_population_for_trail_length(frames: usize) -> usize {
+    let frames = frames.clamp(MIN_TRAIL_FRAMES, MAX_TRAIL_FRAMES);
+    (TRAIL_HISTORY_BYTE_BUDGET / (frames * STR * size_of::<f32>()))
+        .clamp(MIN_POPULATION, MAX_POPULATION)
+}
+
+fn normalize_population(n: usize, trail_capacity: usize) -> usize {
     n.max(MIN_POPULATION)
+        .min(max_population_for_trail_length(trail_capacity))
 }
 
 fn normalize_dimension(dim: u32) -> u32 {
@@ -91,8 +102,9 @@ pub struct Sim {
     /// Maximum in-degree bucket currently observed (for the legend). 0..=3.
     pub ind_max: u8,
 
-    // Trail ring buffer: TRAIL slots × n × STR.
+    // Trail ring buffer: trail_capacity slots × n × STR.
     pub hist: Vec<f32>,
+    trail_capacity: usize,
     head: usize,
     hlen: usize,
 
@@ -105,7 +117,8 @@ pub struct Sim {
 
 impl Sim {
     pub fn new(n: usize, dim: u32, seed: u64) -> Self {
-        let n = normalize_population(n);
+        let trail_capacity = DEFAULT_TRAIL_FRAMES;
+        let n = normalize_population(n, trail_capacity);
         let dim = normalize_dimension(dim);
         let mut s = Sim {
             n,
@@ -148,7 +161,8 @@ impl Sim {
             comp_size: Vec::new(),
             ind: vec![0; n],
             ind_max: 0,
-            hist: vec![0.0; n * TRAIL * STR],
+            hist: vec![0.0; n * trail_capacity * STR],
+            trail_capacity,
             head: 0,
             hlen: 0,
             steps: 0,
@@ -162,8 +176,23 @@ impl Sim {
     }
 
     pub fn resize(&mut self, n: usize) {
-        self.n = normalize_population(n);
+        self.n = normalize_population(n, self.trail_capacity);
         self.build();
+    }
+
+    pub fn set_trail_capacity(&mut self, frames: usize) {
+        let capacity = frames.clamp(MIN_TRAIL_FRAMES, MAX_TRAIL_FRAMES);
+        let max_population = max_population_for_trail_length(capacity);
+        if self.n > max_population {
+            self.n = max_population;
+            self.trail_capacity = capacity;
+            self.build();
+            return;
+        }
+        self.trail_capacity = capacity;
+        self.hist = vec![0.0; self.n * self.trail_capacity * STR];
+        self.head = 0;
+        self.hlen = 0;
     }
 
     pub fn pick(&mut self, i: usize) {
@@ -215,7 +244,7 @@ impl Sim {
         self.comp_size = Vec::new();
         self.ind = vec![0; n];
         self.ind_max = 0;
-        self.hist = vec![0.0; n * TRAIL * STR];
+        self.hist = vec![0.0; n * self.trail_capacity * STR];
         self.head = 0;
         self.hlen = 0;
 
@@ -360,8 +389,9 @@ impl Sim {
         }
 
         self.steps += 1;
+    }
 
-        // Trail ring.
+    pub fn capture_trail_frame(&mut self) {
         let base = self.head * self.n * STR;
         for i in 0..self.n {
             let o = base + i * STR;
@@ -371,8 +401,8 @@ impl Sim {
             self.hist[o + 3] = self.ws[i];
             self.hist[o + 4] = self.vs[i];
         }
-        self.head = (self.head + 1) % TRAIL;
-        if self.hlen < TRAIL {
+        self.head = (self.head + 1) % self.trail_capacity;
+        if self.hlen < self.trail_capacity {
             self.hlen += 1;
         }
     }
@@ -584,6 +614,9 @@ impl Sim {
     pub fn trail_head(&self) -> usize {
         self.head
     }
+    pub fn trail_capacity(&self) -> usize {
+        self.trail_capacity
+    }
 }
 
 /// Pack the 5 per-dim arrays into one interleaved [x,y,z,w,v] * n buffer for a
@@ -636,6 +669,40 @@ mod tests {
     }
 
     #[test]
+    fn trail_history_is_dynamic_and_captured_once_per_frame() {
+        let mut sim = Sim::new(8, 3, 42);
+        assert_eq!(sim.trail_capacity(), DEFAULT_TRAIL_FRAMES);
+        assert_eq!(sim.trail_len(), 0);
+
+        for _ in 0..5 {
+            sim.step();
+        }
+        assert_eq!(sim.trail_len(), 0);
+        sim.capture_trail_frame();
+        assert_eq!(sim.trail_len(), 1);
+
+        sim.set_trail_capacity(1);
+        assert_eq!(sim.trail_capacity(), MIN_TRAIL_FRAMES);
+        assert_eq!(sim.trail_len(), 0);
+        for _ in 0..3 {
+            sim.capture_trail_frame();
+        }
+        assert_eq!(sim.trail_len(), MIN_TRAIL_FRAMES);
+        assert_eq!(sim.trail_head(), 1);
+
+        sim.set_trail_capacity(999);
+        assert_eq!(sim.trail_capacity(), MAX_TRAIL_FRAMES);
+        assert_eq!(sim.hist.len(), sim.n * MAX_TRAIL_FRAMES * STR);
+    }
+
+    #[test]
+    fn trail_history_budget_limits_population() {
+        assert_eq!(max_population_for_trail_length(2), 1_000_000);
+        assert_eq!(max_population_for_trail_length(30), 447_392);
+        assert_eq!(max_population_for_trail_length(120), 111_848);
+    }
+
+    #[test]
     fn preserves_graph_invariants_when_repicking() {
         let mut sim = Sim::new(64, 5, 42);
         assert_graph_invariants(&sim);
@@ -654,7 +721,7 @@ mod tests {
             assert_eq!(values.len(), sim.n);
             assert!(values.iter().all(|value| value.is_finite()));
         }
-        assert_eq!(sim.hist.len(), sim.n * TRAIL * STR);
+        assert_eq!(sim.hist.len(), sim.n * DEFAULT_TRAIL_FRAMES * STR);
         assert_eq!(sim.spd.len(), sim.n);
         assert!(sim.spd.iter().all(|value| value.is_finite()));
         assert!(sim.spread.is_finite());

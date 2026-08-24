@@ -3,9 +3,28 @@ import assert from 'node:assert/strict';
 
 import {
   calculateTrailBudget,
+  maxPopulationForTrailLength,
+  maxPopulationSliderValue,
   nextTrailQuality,
+  populationForSliderValue,
   trailQualityLabel,
 } from './trail-quality.mjs';
+
+test('trail length limits population within the history memory budget', () => {
+  assert.equal(maxPopulationForTrailLength(2), 1_000_000);
+  assert.equal(maxPopulationForTrailLength(30), 447_392);
+  assert.equal(maxPopulationForTrailLength(120), 111_848);
+
+  for (const frames of [2, 30, 120]) {
+    const position = maxPopulationSliderValue(frames);
+    const population = populationForSliderValue(position);
+    assert.ok(population <= maxPopulationForTrailLength(frames));
+    assert.ok(population * frames * 5 * 4 <= 256 * 1024 * 1024);
+    if (position < 1000) {
+      assert.ok(populationForSliderValue(position + 1) > maxPopulationForTrailLength(frames));
+    }
+  }
+});
 
 test('trail budget starts complete and respects the geometry ceiling', () => {
   assert.deepEqual(calculateTrailBudget(2178, 1, 30), {

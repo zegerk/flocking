@@ -231,6 +231,10 @@
     <div class="group-head">View</div>
     <label class="check"><input type="checkbox" id="k-fit" checked> keep the cloud in frame</label>
     <label class="check"><input type="checkbox" id="k-trail" checked> draw trails</label>
+    <div class="ctl">
+      <div class="ctl-top"><span>trail length</span><span class="val" id="v-trail-length">30 frames</span></div>
+      <input type="range" id="s-trail-length" min="2" max="120" step="1" value="30" aria-label="trail length in rendered frames">
+    </div>
     <label class="check"><input type="checkbox" id="k-round" checked> round dots</label>
     <label class="check"><input type="checkbox" id="k-fog" checked> fade with distance</label>
     <label class="check"><input type="checkbox" id="k-shadow" checked> cast onto the floor</label>

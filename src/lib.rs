@@ -12,7 +12,7 @@ mod sim;
 mod tour;
 
 use camera::{CamParams, Camera, Uniforms};
-use sim::{Sim, STR, TRAIL};
+use sim::{Sim, STR};
 use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen]
@@ -92,6 +92,10 @@ impl Flock {
             self.sim.analyse();
             self.colors_dirty = true;
         }
+    }
+
+    pub fn capture_trail_frame(&mut self) {
+        self.sim.capture_trail_frame();
     }
 
     pub fn set_running(&mut self, v: bool) {
@@ -228,6 +232,12 @@ impl Flock {
 
     pub fn set_n(&mut self, n: usize) {
         self.sim.resize(n);
+        self.packed = vec![0.0; self.sim.n * 5];
+        self.colors_dirty = true;
+    }
+
+    pub fn set_trail_length(&mut self, frames: usize) {
+        self.sim.set_trail_capacity(frames);
         self.packed = vec![0.0; self.sim.n * 5];
         self.colors_dirty = true;
     }
@@ -374,7 +384,7 @@ impl Flock {
         self.sim.trail_head()
     }
     pub fn trail_slots(&self) -> usize {
-        TRAIL
+        self.sim.trail_capacity()
     }
     pub fn trail_stride(&self) -> usize {
         STR
@@ -389,7 +399,8 @@ impl Flock {
         max_trails: usize,
     ) -> u32 {
         let n = self.sim.n;
-        let depth = self.sim.trail_len().min(TRAIL);
+        let capacity = self.sim.trail_capacity();
+        let depth = self.sim.trail_len().min(capacity);
         let selected = max_trails.min(n);
         if depth < 2 || selected == 0 {
             return 0;
@@ -418,7 +429,7 @@ impl Flock {
             let mut prev = [0.0f32; 5];
             let mut have = false;
             for k in 0..depth {
-                let slot = (head + TRAIL * 2 - depth + k) % TRAIL;
+                let slot = (head + capacity * 2 - depth + k) % capacity;
                 let o = slot * n * STR + i * STR;
                 let cur = [hist[o], hist[o + 1], hist[o + 2], hist[o + 3], hist[o + 4]];
                 let t = (k + 1) as f32 / depth as f32;
@@ -563,6 +574,7 @@ mod tests {
 
         for _ in 0..4 {
             flock.step();
+            flock.capture_trail_frame();
         }
         assert_eq!(flock.build_trail_geometry(&[], 1, 3), 0);
         assert_eq!(flock.build_trail_geometry(&[1.0, 0.0], 1, 3), 0);
@@ -590,11 +602,13 @@ mod tests {
     #[test]
     fn trail_budget_builds_complete_stable_samples() {
         let mut flock = Flock::new(11, 3, 42);
-        for _ in 0..TRAIL {
+        let capacity = flock.trail_slots();
+        for _ in 0..capacity {
             flock.step();
+            flock.capture_trail_frame();
         }
         let palette = [1.0, 0.5, 0.25];
-        let vertices_per_trail = 2 * (TRAIL - 1);
+        let vertices_per_trail = 2 * (capacity - 1);
 
         assert_eq!(flock.build_trail_geometry(&palette, 1, 0), 0);
         assert_eq!(
@@ -621,6 +635,13 @@ mod tests {
             &order[..4],
             &[0, stride, stride * 2 % flock.n(), stride * 3 % flock.n()]
         );
+
+        flock.set_trail_length(4);
+        for _ in 0..4 {
+            flock.capture_trail_frame();
+        }
+        assert_eq!(flock.trail_slots(), 4);
+        assert_eq!(flock.build_trail_geometry(&palette, 1, 2), 12);
     }
 }
 
