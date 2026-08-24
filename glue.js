@@ -681,6 +681,8 @@ function wire(){
 
   let dotsTimer=0,trailLengthTimer=0;
   E('s-dots').addEventListener('input',e=>{
+    const maxPosition=maxPopulationSliderValue(+E('s-trail-length').value);
+    if(+e.target.value>maxPosition)e.target.value=maxPosition;
     const want=dotsFor(+e.target.value);
     E('v-dots').textContent=want;
     clearTimeout(dotsTimer);
@@ -695,7 +697,6 @@ function wire(){
     const length=+e.target.value;
     const dots=E('s-dots');
     const maxPosition=maxPopulationSliderValue(length);
-    dots.max=maxPosition;
     if(+dots.value>maxPosition){
       dots.value=maxPosition;
       E('v-dots').textContent=dotsFor(maxPosition);
@@ -787,7 +788,6 @@ function wire(){
 
 function start(){
   if(!setupGL())return;
-  E('s-dots').max=maxPopulationSliderValue(+E('s-trail-length').value);
   flock=new window.wasmBindings.Flock(dotsFor(+E('s-dots').value),3,BigInt(Date.now())>>8n);
   flock.sync_colors();
   refreshViews();
