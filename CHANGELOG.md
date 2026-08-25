@@ -7,6 +7,8 @@ Releases before 0.1.12 predate the maintained changelog.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-25
+
 ### Added
 
 - Add strict SemVer synchronization, guarded local release tooling, generated build metadata, and a visible runtime version.
@@ -23,5 +25,6 @@ Releases before 0.1.12 predate the maintained changelog.
 - Add D8 and D24 controls with full grand-tour projection and slicing.
 - Make trail and geometry memory budgets dimension-aware.
 
-[Unreleased]: https://github.com/zegerk/flocking/compare/v0.1.12...HEAD
+[Unreleased]: https://github.com/zegerk/flocking/compare/v0.2.0...HEAD
 [0.1.12]: https://github.com/zegerk/flocking/tree/v0.1.12
+[0.2.0]: https://github.com/zegerk/flocking/compare/v0.1.12...v0.2.0
