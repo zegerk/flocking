@@ -7,6 +7,8 @@ Releases before 0.1.12 predate the maintained changelog.
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-08-25
+
 ### Changed
 
 - Performance: spread is measured on the readout cadence instead of every frame; the GL upload reads sim.pos in place (no per-frame repack copy); analyse() reuses its in-degree/component-size scratch instead of allocating per call; JS caches typed-array views on the wasm buffer, graph versioning now changes only on re-pick so friend/enemy views are not rebuilt every step, line colours are parsed once instead of per frame, line uniforms upload once per frame, and vertex attributes rebind only on dimension change. Simulation semantics are bit-identical (fixed-seed parity harness, examples/parity.rs).
@@ -34,6 +36,7 @@ Releases before 0.1.12 predate the maintained changelog.
 - Add D8 and D24 controls with full grand-tour projection and slicing.
 - Make trail and geometry memory budgets dimension-aware.
 
-[Unreleased]: https://github.com/zegerk/flocking/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/zegerk/flocking/compare/v0.2.1...HEAD
 [0.1.12]: https://github.com/zegerk/flocking/tree/v0.1.12
 [0.2.0]: https://github.com/zegerk/flocking/compare/v0.1.12...v0.2.0
+[0.2.1]: https://github.com/zegerk/flocking/compare/v0.2.0...v0.2.1
