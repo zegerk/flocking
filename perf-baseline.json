@@ -1,0 +1,83 @@
+{
+  "schema": 3,
+  "note": "Ratio of each bench case to its control, with a tolerance measured from repeated runs. Re-record with: npm run perf:bless",
+  "recorded": "2026-08-25",
+  "repeats": 7,
+  "cases": {
+    "step_unit_100k_3d": {
+      "ratio": 1.477296,
+      "tolerance": 0.216,
+      "samples": 7
+    },
+    "step_prop_100k_3d": {
+      "ratio": 0.877764,
+      "tolerance": 0.195,
+      "samples": 7
+    },
+    "step_unit_20k_24d": {
+      "ratio": 1.961955,
+      "tolerance": 0.181,
+      "samples": 7
+    },
+    "step_unit_1M_3d": {
+      "ratio": 314.947008,
+      "tolerance": 0.174,
+      "samples": 7
+    },
+    "analyse_dirty_100k_3d": {
+      "ratio": 49.654742,
+      "tolerance": 0.15,
+      "samples": 7
+    },
+    "analyse_clean_100k_3d": {
+      "ratio": 0.000028,
+      "tolerance": 0.268,
+      "samples": 7
+    },
+    "meas_100k_3d": {
+      "ratio": 2.706935,
+      "tolerance": 0.15,
+      "samples": 7
+    },
+    "capture_trail_100k_3d": {
+      "ratio": 1.534143,
+      "tolerance": 0.207,
+      "samples": 7
+    },
+    "camera_fit_100k_3d": {
+      "ratio": 4.823923,
+      "tolerance": 0.15,
+      "samples": 7
+    },
+    "camera_fit_1M_3d": {
+      "ratio": 7.164559,
+      "tolerance": 0.33,
+      "samples": 7
+    },
+    "step_sync_mode0_100k_3d": {
+      "ratio": 1.569417,
+      "tolerance": 0.197,
+      "samples": 7
+    },
+    "step_sync_mode4_100k_3d": {
+      "ratio": 2.105784,
+      "tolerance": 0.221,
+      "samples": 7
+    },
+    "trail_geom_2k_of_20k_d30": {
+      "ratio": 7.166367,
+      "tolerance": 0.18,
+      "samples": 7
+    },
+    "trail_geom_2k_of_20k_d120": {
+      "ratio": 69.742568,
+      "tolerance": 0.363,
+      "samples": 7
+    },
+    "uniforms_24d": {
+      "ratio": 0.000635,
+      "tolerance": 0.413,
+      "samples": 7
+    }
+  }
+}

@@ -9,9 +9,12 @@
   "scripts": {
     "dev": "trunk serve",
     "build": "trunk build --release",
-    "test:js": "node --test trail-quality.test.mjs versioning.test.mjs",
+    "test:js": "node --test trail-quality.test.mjs versioning.test.mjs perf-harness.test.mjs",
+    "test:perf": "node --test perf.test.mjs",
+    "perf:bless": "node perf-baseline.mjs --bless",
     "version:check": "node scripts/check-version.mjs",
     "verify": "cargo test && npm run test:js && npm run version:check",
+    "verify:perf": "npm run verify && npm run test:perf",
     "release": "node scripts/release.mjs",
     "deploy": "npm run build && wrangler deploy",
     "deploy:env": "set -a && . ./.env && set +a && npm run build && wrangler deploy",

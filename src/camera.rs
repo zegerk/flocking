@@ -6,6 +6,68 @@
 use crate::sim::Sim;
 use crate::tour::{MAX_DIM, MAX_SLICE_DIMS, PDIM};
 
+/// Above this many dots the fit walks a stride instead of every dot. The
+/// bounding box of a sample this large tracks the true one to well under a
+/// pixel, and the result is EMA-smoothed into the camera anyway.
+const FIT_SAMPLE_CAP: usize = 1 << 17;
+
+fn fit_stride(n: usize) -> usize {
+    if n <= FIT_SAMPLE_CAP {
+        1
+    } else {
+        n.div_ceil(FIT_SAMPLE_CAP)
+    }
+}
+
+/// Per-axis bounds with the stride known at compile time, so the accumulators
+/// stay in registers. `chunks_exact` also drops the per-element bounds check.
+fn bounds<const D: usize>(
+    pos: &[f32],
+    n: usize,
+    step: usize,
+    mins: &mut [f32; MAX_DIM],
+    maxs: &mut [f32; MAX_DIM],
+) {
+    let mut lo = [0.0f32; D];
+    let mut hi = [0.0f32; D];
+    lo.copy_from_slice(&mins[..D]);
+    hi.copy_from_slice(&maxs[..D]);
+    macro_rules! scan {
+        ($agents:expr) => {
+            for agent in $agents {
+                for k in 0..D {
+                    lo[k] = lo[k].min(agent[k]);
+                    hi[k] = hi[k].max(agent[k]);
+                }
+            }
+        };
+    }
+    let agents = pos.chunks_exact(D).take(n);
+    if step == 1 {
+        scan!(agents);
+    } else {
+        scan!(agents.step_by(step));
+    }
+    mins[..D].copy_from_slice(&lo);
+    maxs[..D].copy_from_slice(&hi);
+}
+
+fn bounds_dyn(
+    pos: &[f32],
+    n: usize,
+    dim: usize,
+    step: usize,
+    mins: &mut [f32; MAX_DIM],
+    maxs: &mut [f32; MAX_DIM],
+) {
+    for agent in pos.chunks_exact(dim).take(n).step_by(step) {
+        for k in 0..dim {
+            mins[k] = mins[k].min(agent[k]);
+            maxs[k] = maxs[k].max(agent[k]);
+        }
+    }
+}
+
 pub struct Camera {
     pub yaw: f32,
     pub pitch: f32,
@@ -153,12 +215,15 @@ impl Camera {
                 mins[k] = -0.5;
                 maxs[k] = 0.5;
             }
-            for i in 0..sim.n {
-                let offset = i * dim;
-                for k in 0..dim {
-                    mins[k] = mins[k].min(sim.pos[offset + k]);
-                    maxs[k] = maxs[k].max(sim.pos[offset + k]);
-                }
+            let step = fit_stride(sim.n);
+            match dim {
+                2 => bounds::<2>(&sim.pos, sim.n, step, &mut mins, &mut maxs),
+                3 => bounds::<3>(&sim.pos, sim.n, step, &mut mins, &mut maxs),
+                4 => bounds::<4>(&sim.pos, sim.n, step, &mut mins, &mut maxs),
+                5 => bounds::<5>(&sim.pos, sim.n, step, &mut mins, &mut maxs),
+                8 => bounds::<8>(&sim.pos, sim.n, step, &mut mins, &mut maxs),
+                24 => bounds::<24>(&sim.pos, sim.n, step, &mut mins, &mut maxs),
+                _ => bounds_dyn(&sim.pos, sim.n, dim, step, &mut mins, &mut maxs),
             }
             tx = (mins[0] + maxs[0]) / 2.0;
             ty = (mins[1] + maxs[1]) / 2.0;
@@ -246,6 +311,47 @@ impl Camera {
             round: if p.round { 1.0 } else { 0.0 },
             tour_f: sim.tour.f,
             tour_n: sim.tour.n,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn small_populations_are_scanned_exhaustively() {
+        assert_eq!(fit_stride(0), 1);
+        assert_eq!(fit_stride(FIT_SAMPLE_CAP), 1);
+    }
+
+    #[test]
+    fn large_populations_still_sample_at_least_the_cap() {
+        for n in [FIT_SAMPLE_CAP + 1, 500_000, 1_000_000] {
+            let step = fit_stride(n);
+            assert!(step > 1, "n={n} should sample");
+            assert!(n / step >= FIT_SAMPLE_CAP / 2, "n={n} sampled too few dots");
+        }
+    }
+
+    #[test]
+    fn sampled_bounds_stay_inside_the_true_bounds() {
+        let n = FIT_SAMPLE_CAP * 4;
+        let mut pos = vec![0.0f32; n * 3];
+        for (i, agent) in pos.chunks_exact_mut(3).enumerate() {
+            let t = i as f32 / n as f32;
+            agent[0] = t - 0.5;
+            agent[1] = 0.5 - t;
+            agent[2] = (t * 7.0) % 1.0 - 0.5;
+        }
+        let (mut lo, mut hi) = ([0.0f32; MAX_DIM], [0.0f32; MAX_DIM]);
+        bounds::<3>(&pos, n, fit_stride(n), &mut lo, &mut hi);
+        let (mut full_lo, mut full_hi) = ([0.0f32; MAX_DIM], [0.0f32; MAX_DIM]);
+        bounds::<3>(&pos, n, 1, &mut full_lo, &mut full_hi);
+        for k in 0..3 {
+            assert!(lo[k] >= full_lo[k], "axis {k} min escaped the true bound");
+            assert!(hi[k] <= full_hi[k], "axis {k} max escaped the true bound");
+            assert!((hi[k] - lo[k]) > (full_hi[k] - full_lo[k]) * 0.99, "axis {k} lost too much extent");
         }
     }
 }

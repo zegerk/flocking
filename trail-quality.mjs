@@ -35,6 +35,9 @@ export function maxPopulationSliderValue(frames, dim = 5) {
 export function calculateTrailBudget(population, requestedQuality, trailSlots, dim = 5) {
   const count = Math.max(0, Math.floor(population));
   const quality = Math.max(0, Math.min(1, requestedQuality));
+  // Geometry is indexed, so a trail really costs `trailSlots` vertices plus a
+  // shared segment list. Keeping the old un-indexed figure leaves this cap
+  // deliberately conservative rather than wrong.
   const verticesPerTrail = Math.max(1, (Math.floor(trailSlots) - 1) * 2);
   const stride = Math.max(2, Math.min(24, Math.floor(dim)));
   const trailVertexBytes = (stride + 4) * 4 * 2;

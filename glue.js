@@ -12,6 +12,7 @@ import {
   trailQualityLabel,
 } from './trail-quality.mjs';
 import { formatBuildVersion } from './version-display.mjs';
+import { installPerfHarness } from './perf-harness.mjs';
 
 // ---- palettes ----
 // Four named sets. Each set supplies the four mode palettes:
@@ -144,18 +145,12 @@ void loadPosition(out float p[24]){
 `;
 
 // ---- shared GLSL: dynamic N-dimensional projection chain ----
-const PROJ = `
-uniform float uSy,uCy,uSp,uCp,uDist,uFov,uHalf,uCx,uCyC,uCz;
-uniform float uSinA,uCosA,uSinB,uCosB,uSinC,uCosC,uIsoC,uIsoS;
-uniform float uSlabH,uSlabC,uTouring,uDim,uW,uH,uNslice,uFog,uWp,uIso,uBase,uRound;
-uniform float uTourF[72];
-uniform float uTourN[504];
-
-vec4 proj(float p[24], out float ps, out float pd, out bool ok){
-  float x=p[0],y=p[1],z=p[2],w=p[3],v=p[4];
-  float ax,ay,az,aw=w,av=v;
-  ok=true; ps=1.0; pd=1.0;
-  if(uTouring>0.5){
+// Emitted in two variants. `uTouring` is a uniform, so a single shader forces
+// the compiler to keep the tour branch — and its dynamic `p[k]` indexing — live
+// for every vertex, which pushes `float p[24]` into indexable scratch memory
+// even in 3D. Splitting on it lets the non-tour variant keep the position in
+// registers, and drops the 576 tour floats from the per-frame uniform upload.
+const TOUR_PROJECTION = `
     ax=0.0;ay=0.0;az=0.0;
     for(int k=0;k<24;k++){
       if(float(k)>=uDim) break;
@@ -163,7 +158,9 @@ vec4 proj(float p[24], out float ps, out float pd, out bool ok){
       ay+=uTourF[24+k]*p[k];
       az+=uTourF[48+k]*p[k];
     }
-  } else {
+`;
+
+const MANUAL_PROJECTION = `
     ax=x-uCx; ay=y-uCyC; az=z-uCz;
     if(uDim>3.5 && uDim<6.5){
       if(uIso>0.5){
@@ -187,7 +184,41 @@ vec4 proj(float p[24], out float ps, out float pd, out bool ok){
         ax*=kk;ay*=kk;az*=kk;
       }
     }
+`;
+
+const TOUR_CULL = `
+  float sq=0.0;
+  for(int s=0;s<21;s++){
+    if(float(s)>=uNslice) break;
+    float q=s==0 ? -uSlabC : 0.0;
+    for(int k=0;k<24;k++){
+      if(float(k)>=uDim) break;
+      q+=uTourN[s*24+k]*p[k];
+    }
+    sq+=q*q;
   }
+  return sqrt(sq)>uSlabH;
+`;
+
+const MANUAL_CULL = `
+  if(uDim>3.5){
+    if(abs(p[3]-uSlabC)>uSlabH) return true;
+    if(uDim>4.5 && abs(p[4]-uSlabC)>uSlabH) return true;
+  }
+  return false;
+`;
+
+const PROJ = touring => `
+uniform float uSy,uCy,uSp,uCp,uDist,uFov,uHalf,uCx,uCyC,uCz;
+uniform float uSinA,uCosA,uSinB,uCosB,uSinC,uCosC,uIsoC,uIsoS;
+uniform float uSlabH,uSlabC,uTouring,uDim,uW,uH,uNslice,uFog,uWp,uIso,uBase,uRound;
+${touring ? 'uniform float uTourF[72];\nuniform float uTourN[504];' : ''}
+
+vec4 proj(float p[24], out float ps, out float pd, out bool ok){
+  float x=p[0],y=p[1],z=p[2],w=p[3],v=p[4];
+  float ax,ay,az,aw=w,av=v;
+  ok=true; ps=1.0; pd=1.0;
+${touring ? TOUR_PROJECTION : MANUAL_PROJECTION}
   float x1=ax*uCy+az*uSy;
   float z1=-ax*uSy+az*uCy;
   float y2=ay*uCp-z1*uSp;
@@ -207,33 +238,16 @@ vec4 proj(float p[24], out float ps, out float pd, out bool ok){
 
 // slab slice test (tour: orthogonal-space; non-tour 4d/5d: |w|,|v| window)
 bool sliceCull(float p[24]){
-  if(uTouring>0.5){
-    float sq=0.0;
-    for(int s=0;s<21;s++){
-      if(float(s)>=uNslice) break;
-      float q=s==0 ? -uSlabC : 0.0;
-      for(int k=0;k<24;k++){
-        if(float(k)>=uDim) break;
-        q+=uTourN[s*24+k]*p[k];
-      }
-      sq+=q*q;
-    }
-    return sqrt(sq)>uSlabH;
-  }
-  if(uDim>3.5){
-    if(abs(p[3]-uSlabC)>uSlabH) return true;
-    if(uDim>4.5 && abs(p[4]-uSlabC)>uSlabH) return true;
-  }
-  return false;
+${touring ? TOUR_CULL : MANUAL_CULL}
 }
 `;
 
 // ---- point shader (dots) ----
-const DOT_VS = `#version 300 es
+const DOT_VS = touring => `#version 300 es
 precision highp float;
 ${POSITION_INPUTS}
 layout(location=6) in float aCol;
-${PROJ}
+${PROJ(touring)}
 uniform vec3 uPal[8];
 uniform float uOpacity;
 out vec4 vColor;
@@ -264,11 +278,11 @@ void main(){
 }`;
 
 // ---- line shader (trails, links, marks, floor) ----
-const LINE_VS = `#version 300 es
+const LINE_VS = touring => `#version 300 es
 precision highp float;
 ${POSITION_INPUTS}
 layout(location=6) in vec4 aColA;
-${PROJ}
+${PROJ(touring)}
 uniform float uOpacity;
 out vec4 vColor;
 void main(){
@@ -313,7 +327,7 @@ loadBuildVersion();
 const cv = E('c');
 let gl=null, dotProg=null, lineProg=null, flock=null, running=true;
 let posBuf=null, colBuf=null, dotVao=null;
-let trailVao=null, trailPosBuf=null, trailColBuf=null;
+let trailVao=null, trailPosBuf=null, trailColBuf=null, trailIdxBuf=null;
 let lineVao=null, linePosBuf=null, lineColBuf=null;
 let roundU=1;
 
@@ -326,16 +340,34 @@ function makeProgram(vs,fs){const p=gl.createProgram();
 function setupGL(){
   gl=cv.getContext('webgl2',{antialias:true,alpha:false});
   if(!gl){E('legend').textContent='WebGL2 not available.';return false;}
-  dotProg=makeProgram(DOT_VS,DOT_FS);
-  lineProg=makeProgram(LINE_VS,LINE_FS);
-  setDotUniforms=buildUniformSetter(dotProg);
-  setLineUniforms=buildUniformSetter(lineProg);
+  useVariant(false);
   dotVao=gl.createVertexArray(); trailVao=gl.createVertexArray(); lineVao=gl.createVertexArray();
   posBuf=gl.createBuffer(); colBuf=gl.createBuffer();
-  trailPosBuf=gl.createBuffer(); trailColBuf=gl.createBuffer();
+  trailPosBuf=gl.createBuffer(); trailColBuf=gl.createBuffer(); trailIdxBuf=gl.createBuffer();
   linePosBuf=gl.createBuffer(); lineColBuf=gl.createBuffer();
   gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA,gl.ONE_MINUS_SRC_ALPHA);
   return true;
+}
+
+// Programs are compiled once per variant and kept; touring only toggles from
+// the UI or on entering a high dimension.
+const variants=new Map();
+let activeVariant=null;
+function useVariant(touring){
+  const key=touring?1:0;
+  let variant=variants.get(key);
+  if(!variant){
+    const dot=makeProgram(DOT_VS(touring),DOT_FS);
+    const line=makeProgram(LINE_VS(touring),LINE_FS);
+    variant={dot,line,setDot:buildUniformSetter(dot),setLine:buildUniformSetter(line)};
+    variants.set(key,variant);
+  }
+  if(variant!==activeVariant){
+    activeVariant=variant;
+    dotProg=variant.dot; lineProg=variant.line;
+    setDotUniforms=variant.setDot; setLineUniforms=variant.setLine;
+  }
+  return variant;
 }
 
 function size(){
@@ -382,13 +414,18 @@ function refreshUniforms(){ uniCache=flock.uniforms(cv.width,cv.height); }
 // Float32Array.from(...) every frame. Views must be re-created whenever the
 // backing memory could have moved (wasm memory growth, buffer realloc on
 // set_n/set_dim) — tracked by ptr/len pairs + the memory buffer reference.
-function wasmMem(){return window.wasmBindings.wasm_memory();}
+function wasmMem(){
+  // The Memory object is stable for the module's lifetime; only its .buffer
+  // changes, and only when wasm memory grows.
+  if(!wasmMemory)wasmMemory=window.wasmBindings.wasm_memory();
+  return wasmMemory;
+}
 // The backing ArrayBuffer only changes when wasm memory grows — cache the
 // typed views on the buffer identity instead of allocating new ones per call.
-let memBuf=null,memF32=null,memU8=null,memI32=null;
+let wasmMemory=null,memBuf=null,memF32=null,memU8=null,memI32=null,memU32=null;
 function memViews(){
   const b=wasmMem().buffer;
-  if(b!==memBuf){memBuf=b;memF32=new Float32Array(b);memU8=new Uint8Array(b);memI32=new Int32Array(b);}
+  if(b!==memBuf){memBuf=b;memF32=new Float32Array(b);memU8=new Uint8Array(b);memI32=new Int32Array(b);memU32=new Uint32Array(b);}
 }
 function f32view(ptr,len){
   memViews();
@@ -406,6 +443,12 @@ function i32view(ptr,len){
   const o=ptr/4;
   if(o+len<=memI32.length)return memI32.subarray(o,o+len);
   return memI32.slice(o,o+len);
+}
+function u32view(ptr,len){
+  memViews();
+  const o=ptr/4;
+  if(o+len<=memU32.length)return memU32.subarray(o,o+len);
+  return memU32.slice(o,o+len);
 }
 
 let posView=null, colView=null, frView=null, enView=null;
@@ -471,11 +514,10 @@ function uploadDots(){
 // ---- trails: independent GL_LINES segments from the ring buffer ----
 // Strips would drag a streak to the corner when a vertex is culled behind the
 // camera / outside the slab (the shader teleports culled verts offscreen, which
-// does NOT break a strip). Segments let us drop a culled point cleanly by
-// repeating its predecessor, collapsing that segment to zero length.
-// Rust builds complete trails for a stable, adaptively sized sample; here we
-// only upload the persistent scratch buffers from wasm memory.
-let trailQuality=1,trailEffective=1,trailCeiling=1,trailObserve=true;
+// does NOT break a strip). Independent segments let a culled point fade out in
+// place. Rust emits one vertex per sample plus a segment index buffer, so the
+// interior points are uploaded and transformed once rather than twice.
+let trailQuality=1,trailEffective=1,trailCeiling=1,trailObserve=true,trailIndexVersion=-1;
 
 function resetTrailAdaptation(resetQuality){
   if(resetQuality)trailQuality=1;
@@ -508,15 +550,26 @@ function buildTrails(){
   }
   ensureBufferSize(trailColBuf,vc.byteLength);
   gl.bufferSubData(gl.ARRAY_BUFFER,0,vc);
+  // The segment list only changes when the trail count or depth does, so it is
+  // uploaded on a version bump rather than every frame.
+  const indexCount=flock.trail_index_count();
+  const version=flock.trail_index_version();
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,trailIdxBuf);
+  if(trailIndexVersion!==version){
+    trailIndexVersion=version;
+    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER,u32view(flock.trail_indices_ptr(),indexCount),gl.STATIC_DRAW);
+  }
   gl.bindVertexArray(null);
-  return count;
+  return indexCount;
 }
 
 // ---- links + marks + floor (per-frame line geometry) ----
 // Preallocated scratch to avoid per-frame GC churn (the old .push version was
 // the 5fps bottleneck at n=10000). Links subsample like trails at high n.
 let lineVertsScratch=null, lineColsScratch=null;
+const NO_LINES={verts:new Float32Array(0),cols:new Float32Array(0),count:0};
 function buildLines(){
+  if(!P.links && !(P.shadow&&dimVal===3))return NO_LINES;
   const [rr,rg,rb]=RULE_RGB;
   const [sr,sg,sb]=SAGE_RGB;
   const [cr,cg,cb]=CORAL_RGB;
@@ -587,6 +640,7 @@ function uploadLines(L){
 function draw(){
   gl.clearColor(FIELD[0],FIELD[1],FIELD[2],1);
   gl.clear(gl.COLOR_BUFFER_BIT);
+  useVariant(flock.touring_active());
   refreshUniforms();
 
   // trails + links/floor share the line program and uniform values — push
@@ -601,7 +655,7 @@ function draw(){
   // trails first (under dots): independent segments
   if(tc>0){
     gl.bindVertexArray(trailVao);
-    gl.drawArrays(gl.LINES,0,tc);
+    gl.drawElements(gl.LINES,tc,gl.UNSIGNED_INT,0);
     gl.bindVertexArray(null);
   }
 
@@ -670,7 +724,7 @@ function legend(){
 
 // ---- state ----
 const P={trails:true,links:false,shadow:true,opacity:0.5};
-let dimVal=3, colMode=0;
+let dimVal=3, colMode=0, speed=1;
 
 // Slider value → dot count. Exponential mapping so 0..1000 covers 3..1,000,000.
 const dotsFor=populationForSliderValue;
@@ -734,9 +788,10 @@ function setDim(d){
 // ---- loop ----
 function loop(now=performance.now()){
   if(running){
-    const sp=+E('s-speed').value;
-    for(let s=0;s<sp;s++)flock.step();
-    flock.capture_trail_frame();
+    for(let s=0;s<speed;s++)flock.step();
+    // Recording while trails are hidden costs a full n*dim copy per frame and
+    // nothing reads it.
+    if(P.trails)flock.capture_trail_frame();
     uploadDots();
   }
   flock.update_camera(cv.width,cv.height);
@@ -753,7 +808,7 @@ function wire(){
   bind('s-enemy',v=>flock.set_enemy(v/1000));
   bind('s-centre',v=>flock.set_centre(v/1000));
   bind('s-rate',v=>flock.set_repick(v));
-  bind('s-speed',v=>flock.set_speed(v));
+  bind('s-speed',v=>{speed=v;flock.set_speed(v);});
   bind('s-leg',v=>flock.set_leg(v));
   bind('s-lens',v=>flock.set_lens(v/100));
   bind('s-opacity',v=>{P.opacity=v/100;});
@@ -810,7 +865,7 @@ function wire(){
   E('d-24').onclick=()=>setDim(24);
 
   E('k-fit').onchange=e=>flock.set_fit(e.target.checked);
-  E('k-trail').onchange=e=>{P.trails=e.target.checked;resetTrailAdaptation(e.target.checked);readout();};
+  E('k-trail').onchange=e=>{P.trails=e.target.checked;if(e.target.checked)flock.reset_trails();resetTrailAdaptation(e.target.checked);readout();};
   E('k-links').onchange=e=>P.links=e.target.checked;
   E('k-spin').onchange=e=>flock.set_spin(e.target.checked);
   E('k-round').onchange=e=>{flock.set_round(e.target.checked);roundU=e.target.checked?1:0;};
@@ -908,6 +963,7 @@ function start(){
   flock.set_centre(+E('s-centre').value/1000);
   flock.set_repick(+E('s-rate').value);
   flock.set_speed(+E('s-speed').value);
+  speed=+E('s-speed').value;
   flock.set_trail_length(+E('s-trail-length').value);
   flock.set_lens(+E('s-lens').value/100);
   flock.set_slab_h(+E('s-sw').value/100);
@@ -921,6 +977,15 @@ function start(){
   setDim(3);
   labels();legend();readout();
   if(matchMedia('(prefers-reduced-motion: reduce)').matches){running=false;flock.set_running(false);E('b-play').textContent='Play';}
+  // Seams for perf-harness.mjs; the module scope is otherwise unreachable.
+  installPerfHarness({
+    get flock(){return flock;},
+    get gl(){return gl;},
+    uploadDots,buildTrails,buildLines,uploadLines,draw,refreshUniforms,
+    isRunning:()=>running,
+    setRunning:r=>{running=r;flock.set_running(r);E('b-play').textContent=r?'Pause':'Play';},
+    trailsEnabled:()=>P.trails,
+  });
   loop();
 }
 

@@ -61,7 +61,7 @@ pub struct Sim {
     // Graph.
     pub fr: Vec<i32>,
     pub en: Vec<i32>,
-    hu: Vec<u8>,
+    pub hu: Vec<u8>,
     pub flash: Vec<f32>,
 
     // Analyse outputs.
@@ -99,6 +99,13 @@ pub struct Sim {
     indeg: Vec<u32>,
     /// Max cycle length from the latest analyse() (mode 6 legend).
     pub cyc_max: u8,
+    /// Dots currently on a cycle, counted during analyse (mode 3 legend).
+    pub on_cycle: u32,
+    /// Graph version the last analyse() ran against. analyse() is a full O(n)
+    /// pointer-chasing pass and the legend calls it up to 10x/sec, so a clean
+    /// graph must not pay for it twice.
+    analysed_version: u32,
+    analysed_n: usize,
 
     // Trail ring buffer: trail_capacity slots × n × dim.
     pub hist: Vec<f32>,
@@ -154,6 +161,9 @@ impl Sim {
             ind_max: 0,
             indeg: vec![0; n],
             cyc_max: 0,
+            on_cycle: 0,
+            analysed_version: 0,
+            analysed_n: 0,
             hist: vec![0.0; n * trail_capacity * dim as usize],
             trail_capacity,
             head: 0,
@@ -233,9 +243,11 @@ impl Sim {
         self.ind_max = 0;
         self.indeg = vec![0; n];
         self.cyc_max = 0;
+        self.on_cycle = 0;
         self.hist = vec![0.0; n * self.trail_capacity * dim];
         self.head = 0;
         self.hlen = 0;
+        self.analysed_n = usize::MAX;
 
         let pal_len = 5usize; // PAL.length in JS
         for i in 0..n {
@@ -263,9 +275,26 @@ impl Sim {
         self.spread = (s / self.n as f32).sqrt();
     }
 
+    /// Dispatch to a copy of the step body specialized on the dimensions the UI
+    /// offers. `dim` is otherwise a runtime value, which leaves both inner
+    /// loops rolled and bounds-checked.
+    ///
+    /// 24 is deliberately NOT specialized: unrolling a 24-wide gather loop
+    /// measured ~8% slower than the rolled version, while 2-8 gain 11-20%.
     pub fn step(&mut self) {
+        match self.dim {
+            2 => self.step_body(2),
+            3 => self.step_body(3),
+            4 => self.step_body(4),
+            5 => self.step_body(5),
+            8 => self.step_body(8),
+            other => self.step_body(other as usize),
+        }
+    }
+
+    #[inline(always)]
+    fn step_body(&mut self, dim: usize) {
         let (a, b, c, n) = (self.f, self.e, self.c, self.n);
-        let dim = self.dim as usize;
         let prop = self.law_prop;
         // Per-frame maximum resets each step so colour mode 4 reflects the
         // current frame's speed distribution rather than a growing envelope.
@@ -306,6 +335,10 @@ impl Sim {
                 )
             };
 
+            // NOTE: caching the gaps from the distance pass in hoisted [f32; 24]
+            // scratch was measured and reverted — it won 4% on the unit law and
+            // lost 24% on the proportional one. The second gather hits L1 and is
+            // cheaper than the stack round-trip (native A/B, 2026-08).
             let mut s = 0.0;
             for k in 0..dim {
                 let value = pos[io + k];
@@ -349,6 +382,13 @@ impl Sim {
         }
     }
 
+    /// Drop recorded history. Used when trail capture resumes after being off,
+    /// so the ring cannot splice together positions from either side of the gap.
+    pub fn reset_trails(&mut self) {
+        self.head = 0;
+        self.hlen = 0;
+    }
+
     pub fn meas_public(&mut self) {
         self.meas();
     }
@@ -358,6 +398,13 @@ impl Sim {
     /// buckets. All populated in one pass over the friend graph (`fr`).
     pub fn analyse(&mut self) {
         let n = self.n;
+        // The friend graph only changes on a re-pick or rebuild, both of which
+        // bump graph_version. Without this guard the legend re-ran the whole
+        // traversal several times a second over an unchanged graph.
+        if self.analysed_version == self.graph_version && self.analysed_n == n {
+            self.dirty = false;
+            return;
+        }
         self.seen.fill(0);
         // In-degree buckets from fr (overwritten before the traversal loop).
         // fr[i] = friend of i; we count how many dots cite each friend.
@@ -396,6 +443,7 @@ impl Sim {
         let mut nc = 0i32;
         let mut dm = 0i32;
         let mut cyc_max = 0u8;
+        let mut on_cycle = 0u32;
 
         for s0 in 0..n {
             if self.seen[s0] != 0 {
@@ -422,6 +470,7 @@ impl Sim {
                 if cycle_len > cyc_max {
                     cyc_max = cycle_len;
                 }
+                on_cycle += (len - k) as u32;
                 for j in k..len {
                     let u0 = self.pth[j] as usize;
                     self.comp[u0] = c0;
@@ -462,6 +511,7 @@ impl Sim {
         self.ncomp = nc as u32;
         self.dmax = dm.max(1) as u32;
         self.cyc_max = cyc_max;
+        self.on_cycle = on_cycle;
         // Component sizes indexed by comp id; rebuilt each analyse. clear()+
         // resize() keeps the allocation instead of dropping it every call.
         self.comp_size.clear();
@@ -472,6 +522,8 @@ impl Sim {
                 self.comp_size[c as usize] = self.comp_size[c as usize].saturating_add(1);
             }
         }
+        self.analysed_version = self.graph_version;
+        self.analysed_n = n;
         self.dirty = false;
     }
 

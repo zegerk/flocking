@@ -7,6 +7,7 @@
 //!   -> JS uploads to GL and draws.
 
 mod camera;
+pub mod parity;
 mod rng;
 pub mod sim;
 mod tour;
@@ -34,6 +35,11 @@ pub struct Flock {
     /// are on; JS uploads straight from wasm memory.
     trail_verts: Vec<f32>,
     trail_cols: Vec<f32>,
+    /// Line-segment indices into the vertex scratch. Depends only on the trail
+    /// count and depth, so it survives across frames.
+    trail_indices: Vec<u32>,
+    trail_index_shape: (usize, usize),
+    trail_index_version: u32,
 }
 
 #[wasm_bindgen]
@@ -65,6 +71,9 @@ impl Flock {
             frame: 0,
             trail_verts: Vec::new(),
             trail_cols: Vec::new(),
+            trail_indices: Vec::new(),
+            trail_index_shape: (0, 0),
+            trail_index_version: 0,
         }
     }
 
@@ -94,6 +103,13 @@ impl Flock {
 
     pub fn capture_trail_frame(&mut self) {
         self.sim.capture_trail_frame();
+    }
+
+    /// Clear recorded trail history. JS calls this when trail capture resumes
+    /// after being switched off, so the ring cannot join positions across the
+    /// gap into one long streak.
+    pub fn reset_trails(&mut self) {
+        self.sim.reset_trails();
     }
 
     pub fn set_running(&mut self, v: bool) {
@@ -316,8 +332,26 @@ impl Flock {
         if self.colors.len() != n {
             self.colors = vec![0u8; n];
         }
-        for i in 0..n {
-            self.colors[i] = self.sim.color_of(i, mode);
+        let sim = &self.sim;
+        let colors = &mut self.colors;
+        // The mode is fixed for the whole buffer, so the match belongs outside
+        // the loop. Modes 0 and 4 are the ones that get re-run per frame.
+        match mode {
+            0 => colors.copy_from_slice(&sim.hu),
+            4 => {
+                let max = sim.spd_max;
+                let live = max > 1e-12;
+                for (colour, &speed) in colors.iter_mut().zip(&sim.spd) {
+                    let t = if live { (speed / max).sqrt() } else { 0.0 };
+                    let idx = (t * (7.0 - 0.001)).floor() as i32;
+                    *colour = idx.clamp(0, 6) as u8;
+                }
+            }
+            _ => {
+                for (i, colour) in colors.iter_mut().enumerate() {
+                    *colour = sim.color_of(i, mode);
+                }
+            }
         }
         self.colors_dirty = false;
         true
@@ -331,14 +365,10 @@ impl Flock {
     pub fn frame(&self) -> u32 {
         self.frame
     }
+    /// Counted during analyse rather than rescanned; the mode-3 legend asks for
+    /// this every few frames.
     pub fn on_cycle_count(&self) -> u32 {
-        let mut k = 0;
-        for i in 0..self.sim.n {
-            if self.sim.color_of(i, 3) == 1 {
-                k += 1;
-            }
-        }
-        k
+        self.sim.on_cycle
     }
     pub fn touring_active(&self) -> bool {
         self.sim.touring_active()
@@ -388,6 +418,8 @@ impl Flock {
 
     /// Build complete trails for at most `max_trails` dots into persistent
     /// scratch buffers. Sample prefixes are stable as the budget changes.
+    /// Returns the vertex count; the segments themselves are described by
+    /// `trail_indices_ptr` / `trail_index_count`.
     pub fn build_trail_geometry(
         &mut self,
         palette: &[f32],
@@ -403,10 +435,30 @@ impl Flock {
         }
         let head = self.sim.trail_head();
         let dim = self.sim.dim as usize;
-        let max_verts = selected * (depth - 1) * 2;
-        if self.trail_verts.len() < max_verts * dim {
-            self.trail_verts = vec![0.0; max_verts * dim];
-            self.trail_cols = vec![0.0; max_verts * 4];
+        // One vertex per sample: the segment list shares the interior points
+        // rather than storing each of them twice.
+        let vert_count = selected * depth;
+        // Each buffer is checked against its own requirement: the strides
+        // differ, so one shared check leaves the other short when `dim` falls
+        // and the trail budget rises at the same time.
+        if self.trail_verts.len() < vert_count * dim {
+            self.trail_verts = vec![0.0; vert_count * dim];
+        }
+        if self.trail_cols.len() < vert_count * 4 {
+            self.trail_cols = vec![0.0; vert_count * 4];
+        }
+        if self.trail_index_shape != (selected, depth) {
+            self.trail_indices.clear();
+            self.trail_indices.reserve(selected * (depth - 1) * 2);
+            for trail in 0..selected {
+                let base = (trail * depth) as u32;
+                for k in 0..depth as u32 - 1 {
+                    self.trail_indices.push(base + k);
+                    self.trail_indices.push(base + k + 1);
+                }
+            }
+            self.trail_index_shape = (selected, depth);
+            self.trail_index_version = self.trail_index_version.wrapping_add(1);
         }
         // colours must be fresh for this frame
         self.sync_colors();
@@ -420,37 +472,23 @@ impl Flock {
         let mut cp = 0usize;
         let stride = trail_sample_stride(n);
         let mut i = 0usize;
+        let verts = &mut self.trail_verts;
+        let cols = &mut self.trail_cols;
         for _ in 0..selected {
             let ci = (colors[i] as usize) % pal_len;
             let (r, g, b) = (palette[ci * 3], palette[ci * 3 + 1], palette[ci * 3 + 2]);
-            let mut prev = [0.0f32; MAX_DIM];
-            let mut have = false;
             // Walk the ring by wrapping increment instead of a modulo per slot.
             let mut slot = (head + capacity * 2 - depth) % capacity;
             for k in 0..depth {
                 let o = slot * n * dim + i * dim;
-                let mut cur = [0.0f32; MAX_DIM];
-                cur[..dim].copy_from_slice(&hist[o..o + dim]);
+                verts[vp..vp + dim].copy_from_slice(&hist[o..o + dim]);
                 let t = (k + 1) as f32 / depth as f32;
-                let alpha = 0.03 + 0.32 * t * t;
-                if have {
-                    self.trail_verts[vp..vp + dim].copy_from_slice(&prev[..dim]);
-                    self.trail_cols[cp] = r;
-                    self.trail_cols[cp + 1] = g;
-                    self.trail_cols[cp + 2] = b;
-                    self.trail_cols[cp + 3] = alpha;
-                    vp += dim;
-                    cp += 4;
-                    self.trail_verts[vp..vp + dim].copy_from_slice(&cur[..dim]);
-                    self.trail_cols[cp] = r;
-                    self.trail_cols[cp + 1] = g;
-                    self.trail_cols[cp + 2] = b;
-                    self.trail_cols[cp + 3] = alpha;
-                    vp += dim;
-                    cp += 4;
-                }
-                prev = cur;
-                have = true;
+                cols[cp] = r;
+                cols[cp + 1] = g;
+                cols[cp + 2] = b;
+                cols[cp + 3] = 0.03 + 0.32 * t * t;
+                vp += dim;
+                cp += 4;
                 slot += 1;
                 if slot == capacity {
                     slot = 0;
@@ -465,6 +503,17 @@ impl Flock {
     }
     pub fn trail_cols_ptr(&self) -> *const f32 {
         self.trail_cols.as_ptr()
+    }
+    pub fn trail_indices_ptr(&self) -> *const u32 {
+        self.trail_indices.as_ptr()
+    }
+    pub fn trail_index_count(&self) -> usize {
+        self.trail_indices.len()
+    }
+    /// Bumped when the index buffer is rebuilt, so JS re-uploads it only when
+    /// the trail count or depth actually changed.
+    pub fn trail_index_version(&self) -> u32 {
+        self.trail_index_version
     }
 
     /// Flat f32 uniform block for the vertex shader. Order:
@@ -643,6 +692,31 @@ mod tests {
     }
 
     #[test]
+    fn trail_geometry_survives_a_dimension_change() {
+        let palette = vec![0.5f32; 24];
+        let mut flock = Flock::new(2178, 24, 42);
+        flock.set_trail_length(30);
+        for _ in 0..30 {
+            flock.step();
+            flock.capture_trail_frame();
+        }
+        // A smaller budget here, a larger one after the switch: the adaptive
+        // trail quality does exactly this in the page.
+        flock.build_trail_geometry(&palette, 8, flock.n() / 2);
+
+        // Dropping to 3d shrinks the per-vertex stride 8x while the budget
+        // grows, so a shared size check on the vertex buffer alone leaves the
+        // colour buffer short.
+        flock.set_dim(3);
+        for _ in 0..30 {
+            flock.step();
+            flock.capture_trail_frame();
+        }
+        let vertices = flock.build_trail_geometry(&palette, 8, flock.n());
+        assert_eq!(vertices, (flock.n() * 30) as u32);
+    }
+
+    #[test]
     fn trail_budget_builds_complete_stable_samples() {
         let mut flock = Flock::new(11, 3, 42);
         let capacity = flock.trail_slots();
@@ -651,16 +725,22 @@ mod tests {
             flock.capture_trail_frame();
         }
         let palette = [1.0, 0.5, 0.25];
-        let vertices_per_trail = 2 * (capacity - 1);
+        // One vertex per sample; the segments come from the index buffer.
+        let segments_per_trail = capacity - 1;
 
         assert_eq!(flock.build_trail_geometry(&palette, 1, 0), 0);
         assert_eq!(
             flock.build_trail_geometry(&palette, 1, 4),
-            (4 * vertices_per_trail) as u32
+            (4 * capacity) as u32
         );
+        assert_eq!(flock.trail_index_count(), 4 * segments_per_trail * 2);
         assert_eq!(
             flock.build_trail_geometry(&palette, 1, flock.n()),
-            (flock.n() * vertices_per_trail) as u32
+            (flock.n() * capacity) as u32
+        );
+        assert_eq!(
+            flock.trail_index_count(),
+            flock.n() * segments_per_trail * 2
         );
 
         let stride = trail_sample_stride(flock.n());
@@ -684,7 +764,9 @@ mod tests {
             flock.capture_trail_frame();
         }
         assert_eq!(flock.trail_slots(), 4);
-        assert_eq!(flock.build_trail_geometry(&palette, 1, 2), 12);
+        // 2 trails x 4 samples, joined by 2 x 3 segments.
+        assert_eq!(flock.build_trail_geometry(&palette, 1, 2), 8);
+        assert_eq!(flock.trail_index_count(), 12);
     }
 }
 
