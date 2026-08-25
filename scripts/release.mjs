@@ -1,4 +1,5 @@
 import { execFileSync } from 'node:child_process';
+import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
 
@@ -81,7 +82,7 @@ try {
   if (dryRun) process.exit(0);
 
   writesStarted = true;
-  for (const [file, contents] of outputs) await atomicWrite(new URL(`../${file}`, import.meta.url), contents);
+  for (const [file, contents] of outputs) await atomicWrite(path.join(root, file), contents);
   execFileSync('cargo', ['metadata', '--format-version', '1'], { cwd: root, stdio: ['ignore', 'ignore', 'inherit'] });
   execFileSync('npm', ['run', 'version:check'], { cwd: root, stdio: 'inherit' });
   execFileSync('cargo', ['test'], { cwd: root, stdio: 'inherit' });
