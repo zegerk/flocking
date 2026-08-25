@@ -7,6 +7,8 @@ Releases before 0.1.12 predate the maintained changelog.
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-08-25
+
 ### Added
 
 - Add a reusable performance test suite: `npm run test:perf` gates the native benchmarks against `perf-baseline.json`, and `npm run perf:bless` re-records it. Cases are scored as a ratio to an untouched control and each tolerance is measured from repeated runs rather than guessed, so the thresholds survive different machines. `tests/parity.rs` now asserts the fixed-seed simulation hashes under `cargo test`, and `perf-harness.mjs` times the wasm boundary, GL uploads and draw in the page — call `perfHarness.run()` from the console, or load the page with `?perf=1` to have it run automatically and publish the report into the document.
@@ -55,7 +57,8 @@ Releases before 0.1.12 predate the maintained changelog.
 - Add D8 and D24 controls with full grand-tour projection and slicing.
 - Make trail and geometry memory budgets dimension-aware.
 
-[Unreleased]: https://github.com/zegerk/flocking/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/zegerk/flocking/compare/v0.2.2...HEAD
 [0.1.12]: https://github.com/zegerk/flocking/tree/v0.1.12
 [0.2.0]: https://github.com/zegerk/flocking/compare/v0.1.12...v0.2.0
 [0.2.1]: https://github.com/zegerk/flocking/compare/v0.2.0...v0.2.1
+[0.2.2]: https://github.com/zegerk/flocking/compare/v0.2.1...v0.2.2
