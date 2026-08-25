@@ -75,6 +75,10 @@ pub struct Sim {
     /// Set by any re-pick; cleared by analyse(). Flock watches this to know
     /// when the cached colour buffer is stale.
     pub dirty: bool,
+    /// Bumped only on re-pick / rebuild. JS compares this to decide when the
+    /// friend/enemy views need re-creating — it must NOT change on a plain
+    /// step, or that cache never hits while running.
+    pub graph_version: u32,
 
     // New "colour by" signals (computed in step/analyse).
     /// Per-dot squared displacement this frame (xs/ys/zs/ws/vs deltas²).
@@ -91,6 +95,10 @@ pub struct Sim {
     pub ind: Vec<u8>,
     /// Maximum in-degree bucket currently observed (for the legend). 0..=3.
     pub ind_max: u8,
+    /// Scratch in-degree counts reused across analyse() calls (no per-call alloc).
+    indeg: Vec<u32>,
+    /// Max cycle length from the latest analyse() (mode 6 legend).
+    pub cyc_max: u8,
 
     // Trail ring buffer: trail_capacity slots × n × dim.
     pub hist: Vec<f32>,
@@ -137,12 +145,15 @@ impl Sim {
             ncomp: 0,
             dmax: 1,
             dirty: true,
+            graph_version: 0,
             spd: vec![0.0; n],
             spd_max: 0.0,
             cyc_len: vec![0; n],
             comp_size: Vec::new(),
             ind: vec![0; n],
             ind_max: 0,
+            indeg: vec![0; n],
+            cyc_max: 0,
             hist: vec![0.0; n * trail_capacity * dim as usize],
             trail_capacity,
             head: 0,
@@ -191,6 +202,7 @@ impl Sim {
         self.en[i] = e as i32;
         self.flash[i] = 1.0;
         self.dirty = true;
+        self.graph_version = self.graph_version.wrapping_add(1);
     }
 
     pub fn repick_all(&mut self) {
@@ -219,6 +231,8 @@ impl Sim {
         self.comp_size = Vec::new();
         self.ind = vec![0; n];
         self.ind_max = 0;
+        self.indeg = vec![0; n];
+        self.cyc_max = 0;
         self.hist = vec![0.0; n * self.trail_capacity * dim];
         self.head = 0;
         self.hlen = 0;
@@ -257,9 +271,19 @@ impl Sim {
         // current frame's speed distribution rather than a growing envelope.
         let mut frame_spd_max = 0.0f32;
 
+        // Field-level borrows keep the hot loop free of repeated `self.`
+        // member access and let the optimizer see that pos/next_pos don't
+        // alias.
+        let pos = &self.pos;
+        let next_pos = &mut self.next_pos;
+        let fr = &self.fr;
+        let en = &self.en;
+        let spd = &mut self.spd;
+        let flash = &mut self.flash;
+
         for i in 0..n {
-            let f = self.fr[i] as usize;
-            let e = self.en[i] as usize;
+            let f = fr[i] as usize;
+            let e = en[i] as usize;
             let io = i * dim;
             let fo = f * dim;
             let eo = e * dim;
@@ -269,8 +293,8 @@ impl Sim {
                 let mut friend_dist_sq = 0.0;
                 let mut enemy_dist_sq = 0.0;
                 for k in 0..dim {
-                    let friend_gap = self.pos[fo + k] - self.pos[io + k];
-                    let enemy_gap = self.pos[eo + k] - self.pos[io + k];
+                    let friend_gap = pos[fo + k] - pos[io + k];
+                    let enemy_gap = pos[eo + k] - pos[io + k];
                     friend_dist_sq += friend_gap * friend_gap;
                     enemy_dist_sq += enemy_gap * enemy_gap;
                 }
@@ -284,21 +308,25 @@ impl Sim {
 
             let mut s = 0.0;
             for k in 0..dim {
-                let value = self.pos[io + k];
-                let friend_gap = self.pos[fo + k] - value;
-                let enemy_gap = self.pos[eo + k] - value;
+                let value = pos[io + k];
+                let friend_gap = pos[fo + k] - value;
+                let enemy_gap = pos[eo + k] - value;
                 let delta = -c * value + friend_scale * friend_gap - enemy_scale * enemy_gap;
-                self.next_pos[io + k] = value + delta;
+                next_pos[io + k] = value + delta;
                 s += delta * delta;
             }
-            self.spd[i] = s;
+            spd[i] = s;
             if s > frame_spd_max {
                 frame_spd_max = s;
             }
-            self.flash[i] *= 0.93;
+            flash[i] *= 0.93;
         }
         self.spd_max = frame_spd_max;
 
+        // NOTE: measured against fusing this clamp into the compute loop +
+        // swapping buffers — the separate pass is ~20-80% faster because it
+        // stays a trivially vectorizable streaming loop, while clamping in
+        // the gather-bound compute loop de-optimizes it (native A/B, 2026-08).
         for (position, &next) in self.pos.iter_mut().zip(&self.next_pos) {
             *position = clamp_pos(next);
         }
@@ -333,15 +361,25 @@ impl Sim {
         self.seen.fill(0);
         // In-degree buckets from fr (overwritten before the traversal loop).
         // fr[i] = friend of i; we count how many dots cite each friend.
-        let mut indeg = vec![0u32; n];
-        for i in 0..n {
-            let f = self.fr[i] as usize;
-            if f < n {
-                indeg[f] = indeg[f].saturating_add(1);
+        // Scratch buffer is reused across calls — analyse runs up to 10x/sec
+        // while a graph-derived legend is visible.
+        if self.indeg.len() != n {
+            self.indeg = vec![0u32; n];
+        } else {
+            self.indeg.fill(0);
+        }
+        {
+            let indeg = &mut self.indeg;
+            let fr = &self.fr;
+            for i in 0..n {
+                let f = fr[i] as usize;
+                if f < n {
+                    indeg[f] = indeg[f].saturating_add(1);
+                }
             }
         }
         let mut ind_max = 0u8;
-        for (&degree, bucket) in indeg.iter().zip(self.ind.iter_mut()) {
+        for (&degree, bucket) in self.indeg.iter().zip(self.ind.iter_mut()) {
             let b = match degree {
                 0 => 0u8,
                 1 => 1u8,
@@ -357,6 +395,7 @@ impl Sim {
 
         let mut nc = 0i32;
         let mut dm = 0i32;
+        let mut cyc_max = 0u8;
 
         for s0 in 0..n {
             if self.seen[s0] != 0 {
@@ -380,6 +419,9 @@ impl Sim {
                 let c0 = nc;
                 nc += 1;
                 cycle_len = (len - k).min(255) as u8;
+                if cycle_len > cyc_max {
+                    cyc_max = cycle_len;
+                }
                 for j in k..len {
                     let u0 = self.pth[j] as usize;
                     self.comp[u0] = c0;
@@ -419,8 +461,11 @@ impl Sim {
         }
         self.ncomp = nc as u32;
         self.dmax = dm.max(1) as u32;
-        // Component sizes indexed by comp id; rebuilt each analyse.
-        self.comp_size = vec![0u32; self.ncomp as usize];
+        self.cyc_max = cyc_max;
+        // Component sizes indexed by comp id; rebuilt each analyse. clear()+
+        // resize() keeps the allocation instead of dropping it every call.
+        self.comp_size.clear();
+        self.comp_size.resize(self.ncomp as usize, 0);
         for i in 0..n {
             let c = self.comp[i];
             if c >= 0 && (c as usize) < self.comp_size.len() {
@@ -531,11 +576,6 @@ impl Sim {
     pub fn trail_capacity(&self) -> usize {
         self.trail_capacity
     }
-}
-
-/// Copy the row-major positions into the persistent GL upload buffer.
-pub fn pack_positions(sim: &Sim, out: &mut [f32]) {
-    out[..sim.pos.len()].copy_from_slice(&sim.pos);
 }
 
 #[cfg(test)]

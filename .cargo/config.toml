@@ -1,0 +1,4 @@
+# Enable WebAssembly SIMD so LLVM can auto-vectorize the per-agent dimension
+# loops (step / meas / camera fit). All evergreen browsers support simd128.
+[target.wasm32-unknown-unknown]
+rustflags = ["-C", "target-feature=+simd128"]

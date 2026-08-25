@@ -8,7 +8,7 @@
 
 mod camera;
 mod rng;
-mod sim;
+pub mod sim;
 mod tour;
 
 use camera::{CamParams, Camera, Uniforms};
@@ -20,7 +20,6 @@ use wasm_bindgen::prelude::*;
 pub struct Flock {
     sim: Sim,
     cam: Camera,
-    packed: Vec<f32>,
     p: CamParams,
     col_mode: u32,
     shadow: bool,
@@ -42,11 +41,9 @@ impl Flock {
     #[wasm_bindgen(constructor)]
     pub fn new(n: usize, dim: u32, seed: u64) -> Flock {
         let sim = Sim::new(n, dim, seed);
-        let packed = vec![0.0; sim.n * sim.dim as usize];
         Flock {
             sim,
             cam: Camera::new(),
-            packed,
             p: CamParams {
                 rock: true,
                 spin: false,
@@ -107,20 +104,23 @@ impl Flock {
     pub fn update_camera(&mut self, width: f32, height: f32) {
         let p = clone_params(&self.p);
         self.cam.update(&mut self.sim, &p, width, height);
+    }
+
+    /// Recompute the spread readout on demand. It's a full n*dim pass, so JS
+    /// calls it on the readout cadence (every 6 frames) instead of per frame.
+    pub fn measure_spread(&mut self) {
         self.sim.meas_public();
     }
 
-    /// Repack positions interleaved into the persistent scratch buffer.
-    /// JS reads them through the pointer/length accessors below (zero-copy).
-    pub fn repack_positions(&mut self) {
-        sim::pack_positions(&self.sim, &mut self.packed);
-    }
+    /// sim.pos is already row-major interleaved — exactly the GL vertex
+    /// layout — so JS reads it in place (zero-copy, no repack pass). The
+    /// pointer is re-read every frame, so realloc on set_n/set_dim is safe.
     pub fn positions_ptr(&self) -> *const f32 {
-        self.packed.as_ptr()
+        self.sim.pos.as_ptr()
     }
 
     pub fn positions_len(&self) -> usize {
-        self.packed.len()
+        self.sim.pos.len()
     }
 
     pub fn n(&self) -> usize {
@@ -227,19 +227,16 @@ impl Flock {
         if self.sim.dim == 2 {
             self.p.spin = false;
         }
-        self.packed = vec![0.0; self.sim.n * self.sim.dim as usize];
         self.colors_dirty = true;
     }
 
     pub fn set_n(&mut self, n: usize) {
         self.sim.resize(n);
-        self.packed = vec![0.0; self.sim.n * self.sim.dim as usize];
         self.colors_dirty = true;
     }
 
     pub fn set_trail_length(&mut self, frames: usize) {
         self.sim.set_trail_capacity(frames);
-        self.packed = vec![0.0; self.sim.n * self.sim.dim as usize];
         self.colors_dirty = true;
     }
 
@@ -290,12 +287,10 @@ impl Flock {
     pub fn spd_max(&self) -> f32 {
         self.sim.spd_max
     }
-    /// Max cycle length currently observed (colour mode 6 legend).
+    /// Max cycle length currently observed (colour mode 6 legend). Tracked
+    /// during analyse() — no per-call scan.
     pub fn cyc_len_max(&self) -> u8 {
-        (0..self.sim.n)
-            .map(|i| self.sim.cyc_len[i])
-            .max()
-            .unwrap_or(0)
+        self.sim.cyc_max
     }
     /// Largest component size currently observed (colour mode 5 legend).
     pub fn comp_size_max(&self) -> u32 {
@@ -356,10 +351,10 @@ impl Flock {
     }
 
     // --- links + flash ---
-    /// Bumped on every re-pick so JS can refresh the friend/enemy views
-    /// (their pointers may move when the graph arrays are rebuilt).
+    /// Bumped only on re-pick / rebuild, so JS refreshes the friend/enemy
+    /// views exactly when the graph changed — not every step.
     pub fn graph_version(&self) -> u32 {
-        self.frame
+        self.sim.graph_version
     }
     pub fn friends_ptr(&self) -> *const i32 {
         self.sim.fr.as_ptr()
@@ -430,8 +425,9 @@ impl Flock {
             let (r, g, b) = (palette[ci * 3], palette[ci * 3 + 1], palette[ci * 3 + 2]);
             let mut prev = [0.0f32; MAX_DIM];
             let mut have = false;
+            // Walk the ring by wrapping increment instead of a modulo per slot.
+            let mut slot = (head + capacity * 2 - depth) % capacity;
             for k in 0..depth {
-                let slot = (head + capacity * 2 - depth + k) % capacity;
                 let o = slot * n * dim + i * dim;
                 let mut cur = [0.0f32; MAX_DIM];
                 cur[..dim].copy_from_slice(&hist[o..o + dim]);
@@ -455,6 +451,10 @@ impl Flock {
                 }
                 prev = cur;
                 have = true;
+                slot += 1;
+                if slot == capacity {
+                    slot = 0;
+                }
             }
             i = (i + stride) % n;
         }
@@ -567,6 +567,15 @@ mod tests {
         assert_eq!(flock.n(), 3);
         assert_eq!(flock.dim(), 2);
         assert_eq!(flock.positions_len(), 6);
+    }
+
+    #[test]
+    fn positions_view_aliases_sim_buffer() {
+        // Zero-copy contract: JS reads sim.pos in place. A regression to a
+        // packed copy would silently double per-frame memory traffic.
+        let flock = Flock::new(8, 3, 42);
+        assert_eq!(flock.positions_ptr(), flock.sim.pos.as_ptr());
+        assert_eq!(flock.positions_len(), flock.sim.pos.len());
     }
 
     #[test]

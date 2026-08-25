@@ -122,6 +122,9 @@ let palSet = 3; // default set = 'viridis'
 function palFloats(mode, set=palSet){ return palCache[set][mode]; }
 
 const FIELD = (()=>{const[r,g,b]=hexToRgb(cssVar('field'));return [r,g,b,1];})();
+// Pre-parsed line colours — parsing hex strings every frame in buildLines is
+// avoidable churn.
+const RULE_RGB=hexToRgb(RULE),SAGE_RGB=hexToRgb(SAGE),CORAL_RGB=hexToRgb(CORAL);
 
 const POSITION_INPUTS = `
 layout(location=0) in vec4 aP0;
@@ -380,25 +383,29 @@ function refreshUniforms(){ uniCache=flock.uniforms(cv.width,cv.height); }
 // backing memory could have moved (wasm memory growth, buffer realloc on
 // set_n/set_dim) — tracked by ptr/len pairs + the memory buffer reference.
 function wasmMem(){return window.wasmBindings.wasm_memory();}
+// The backing ArrayBuffer only changes when wasm memory grows — cache the
+// typed views on the buffer identity instead of allocating new ones per call.
+let memBuf=null,memF32=null,memU8=null,memI32=null;
+function memViews(){
+  const b=wasmMem().buffer;
+  if(b!==memBuf){memBuf=b;memF32=new Float32Array(b);memU8=new Uint8Array(b);memI32=new Int32Array(b);}
+}
 function f32view(ptr,len){
-  const m=wasmMem();
-  const full=new Float32Array(m.buffer);
+  memViews();
   const o=ptr/4;
-  if(o+len<=full.length)return full.subarray(o,o+len);
-  return full.slice(o,o+len); // moved during the frame: fall back to a copy
+  if(o+len<=memF32.length)return memF32.subarray(o,o+len);
+  return memF32.slice(o,o+len); // moved during the frame: fall back to a copy
 }
 function u8view(ptr,len){
-  const m=wasmMem();
-  const full=new Uint8Array(m.buffer);
-  if(ptr+len<=full.length)return full.subarray(ptr,ptr+len);
-  return full.slice(ptr,ptr+len);
+  memViews();
+  if(ptr+len<=memU8.length)return memU8.subarray(ptr,ptr+len);
+  return memU8.slice(ptr,ptr+len);
 }
 function i32view(ptr,len){
-  const m=wasmMem();
-  const full=new Int32Array(m.buffer);
+  memViews();
   const o=ptr/4;
-  if(o+len<=full.length)return full.subarray(o,o+len);
-  return full.slice(o,o+len);
+  if(o+len<=memI32.length)return memI32.subarray(o,o+len);
+  return memI32.slice(o,o+len);
 }
 
 let posView=null, colView=null, frView=null, enView=null;
@@ -440,19 +447,24 @@ function bindPositionAttributes(dim){
 }
 
 function uploadDots(){
-  flock.repack_positions();
   posView=f32view(flock.positions_ptr(),flock.positions_len());
   gl.bindVertexArray(dotVao);
   ensureBufferSize(posBuf,posView.byteLength);
   gl.bufferSubData(gl.ARRAY_BUFFER,0,posView);
-  bindPositionAttributes(flock.dim());
+  // Vertex-attrib layout lives in the VAO and only depends on dim — rebind
+  // (attrs 0-5 from posBuf, attr 6 from colBuf) only when dim changes.
+  const dim=flock.dim();
+  if(dotVao._dim!==dim){
+    dotVao._dim=dim;
+    bindPositionAttributes(dim);
+    gl.bindBuffer(gl.ARRAY_BUFFER,colBuf);
+    gl.enableVertexAttribArray(6); gl.vertexAttribPointer(6,1,gl.UNSIGNED_BYTE,false,0,0);
+  }
   if(flock.sync_colors()||colView===null){
     colView=u8view(flock.colors_ptr(),flock.colors_len());
     ensureBufferSize(colBuf,colView.byteLength);
     gl.bufferSubData(gl.ARRAY_BUFFER,0,colView);
   }
-  gl.bindBuffer(gl.ARRAY_BUFFER,colBuf);
-  gl.enableVertexAttribArray(6); gl.vertexAttribPointer(6,1,gl.UNSIGNED_BYTE,false,0,0);
   gl.bindVertexArray(null);
 }
 
@@ -488,10 +500,14 @@ function buildTrails(){
   gl.bindVertexArray(trailVao);
   ensureBufferSize(trailPosBuf,verts.byteLength);
   gl.bufferSubData(gl.ARRAY_BUFFER,0,verts);
-  bindPositionAttributes(dim);
+  if(trailVao._dim!==dim){
+    trailVao._dim=dim;
+    bindPositionAttributes(dim);
+    gl.bindBuffer(gl.ARRAY_BUFFER,trailColBuf);
+    gl.enableVertexAttribArray(6);gl.vertexAttribPointer(6,4,gl.FLOAT,false,0,0);
+  }
   ensureBufferSize(trailColBuf,vc.byteLength);
   gl.bufferSubData(gl.ARRAY_BUFFER,0,vc);
-  gl.enableVertexAttribArray(6);gl.vertexAttribPointer(6,4,gl.FLOAT,false,0,0);
   gl.bindVertexArray(null);
   return count;
 }
@@ -501,9 +517,9 @@ function buildTrails(){
 // the 5fps bottleneck at n=10000). Links subsample like trails at high n.
 let lineVertsScratch=null, lineColsScratch=null;
 function buildLines(){
-  const [rr,rg,rb]=hexToRgb(RULE);
-  const [sr,sg,sb]=hexToRgb(SAGE);
-  const [cr,cg,cb]=hexToRgb(CORAL);
+  const [rr,rg,rb]=RULE_RGB;
+  const [sr,sg,sb]=SAGE_RGB;
+  const [cr,cg,cb]=CORAL_RGB;
   const n=flock.n();
   const dim=flock.dim();
 
@@ -556,10 +572,15 @@ function uploadLines(L){
   gl.bindVertexArray(lineVao);
   ensureBufferSize(linePosBuf,L.verts.byteLength);
   gl.bufferSubData(gl.ARRAY_BUFFER,0,L.verts);
-  bindPositionAttributes(flock.dim());
+  const dim=flock.dim();
+  if(lineVao._dim!==dim){
+    lineVao._dim=dim;
+    bindPositionAttributes(dim);
+    gl.bindBuffer(gl.ARRAY_BUFFER,lineColBuf);
+    gl.enableVertexAttribArray(6);gl.vertexAttribPointer(6,4,gl.FLOAT,false,0,0);
+  }
   ensureBufferSize(lineColBuf,L.cols.byteLength);
   gl.bufferSubData(gl.ARRAY_BUFFER,0,L.cols);
-  gl.enableVertexAttribArray(6);gl.vertexAttribPointer(6,4,gl.FLOAT,false,0,0);
   gl.bindVertexArray(null);
 }
 
@@ -568,22 +589,25 @@ function draw(){
   gl.clear(gl.COLOR_BUFFER_BIT);
   refreshUniforms();
 
-  // trails first (under dots): independent segments
+  // trails + links/floor share the line program and uniform values — push
+  // them once per frame instead of per draw batch.
   const tc=buildTrails();
-  if(tc>0){
+  const L=buildLines();
+  if(tc>0||L.count>0){
     setLineUniforms(uniCache);
     gl.uniform1f(U(lineProg,'uOpacity'),P.opacity);
+  }
+
+  // trails first (under dots): independent segments
+  if(tc>0){
     gl.bindVertexArray(trailVao);
     gl.drawArrays(gl.LINES,0,tc);
     gl.bindVertexArray(null);
   }
 
   // links + marks + floor
-  const L=buildLines();
   if(L.count>0){
     uploadLines(L);
-    setLineUniforms(uniCache);
-    gl.uniform1f(U(lineProg,'uOpacity'),P.opacity);
     gl.bindVertexArray(lineVao);
     gl.drawArrays(gl.LINES,0,L.count);
     gl.bindVertexArray(null);
@@ -614,6 +638,7 @@ function updateFrameRate(now){
 }
 function readout(){
   E('r-step').textContent=Number(flock.steps()).toLocaleString();
+  flock.measure_spread(); // full n*dim pass — runs on the readout cadence, not per frame
   const s=flock.spread();
   E('r-spread').textContent=s<1e4?s.toFixed(3):s.toExponential(1);
   E('r-view').textContent=flock.yaw_deg()+'° / '+flock.pitch_deg()+'°';
