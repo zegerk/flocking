@@ -12,7 +12,8 @@ mod sim;
 mod tour;
 
 use camera::{CamParams, Camera, Uniforms};
-use sim::{Sim, STR};
+use sim::Sim;
+use tour::{MAX_DIM, MAX_SLICE_DIMS, PDIM};
 use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen]
@@ -41,7 +42,7 @@ impl Flock {
     #[wasm_bindgen(constructor)]
     pub fn new(n: usize, dim: u32, seed: u64) -> Flock {
         let sim = Sim::new(n, dim, seed);
-        let packed = vec![0.0; sim.n * 5];
+        let packed = vec![0.0; sim.n * sim.dim as usize];
         Flock {
             sim,
             cam: Camera::new(),
@@ -226,19 +227,19 @@ impl Flock {
         if self.sim.dim == 2 {
             self.p.spin = false;
         }
-        self.packed = vec![0.0; self.sim.n * 5];
+        self.packed = vec![0.0; self.sim.n * self.sim.dim as usize];
         self.colors_dirty = true;
     }
 
     pub fn set_n(&mut self, n: usize) {
         self.sim.resize(n);
-        self.packed = vec![0.0; self.sim.n * 5];
+        self.packed = vec![0.0; self.sim.n * self.sim.dim as usize];
         self.colors_dirty = true;
     }
 
     pub fn set_trail_length(&mut self, frames: usize) {
         self.sim.set_trail_capacity(frames);
-        self.packed = vec![0.0; self.sim.n * 5];
+        self.packed = vec![0.0; self.sim.n * self.sim.dim as usize];
         self.colors_dirty = true;
     }
 
@@ -261,7 +262,7 @@ impl Flock {
         }
     }
     pub fn set_zoom(&mut self, v: f32) {
-        self.cam.zoom = v.clamp(0.15, 8.0);
+        self.cam.zoom = v.clamp(0.15, 64.0);
     }
     pub fn zoom(&self) -> f32 {
         self.cam.zoom
@@ -387,7 +388,7 @@ impl Flock {
         self.sim.trail_capacity()
     }
     pub fn trail_stride(&self) -> usize {
-        STR
+        self.sim.dim as usize
     }
 
     /// Build complete trails for at most `max_trails` dots into persistent
@@ -406,9 +407,10 @@ impl Flock {
             return 0;
         }
         let head = self.sim.trail_head();
+        let dim = self.sim.dim as usize;
         let max_verts = selected * (depth - 1) * 2;
-        if self.trail_verts.len() < max_verts * 5 {
-            self.trail_verts = vec![0.0; max_verts * 5];
+        if self.trail_verts.len() < max_verts * dim {
+            self.trail_verts = vec![0.0; max_verts * dim];
             self.trail_cols = vec![0.0; max_verts * 4];
         }
         // colours must be fresh for this frame
@@ -426,28 +428,29 @@ impl Flock {
         for _ in 0..selected {
             let ci = (colors[i] as usize) % pal_len;
             let (r, g, b) = (palette[ci * 3], palette[ci * 3 + 1], palette[ci * 3 + 2]);
-            let mut prev = [0.0f32; 5];
+            let mut prev = [0.0f32; MAX_DIM];
             let mut have = false;
             for k in 0..depth {
                 let slot = (head + capacity * 2 - depth + k) % capacity;
-                let o = slot * n * STR + i * STR;
-                let cur = [hist[o], hist[o + 1], hist[o + 2], hist[o + 3], hist[o + 4]];
+                let o = slot * n * dim + i * dim;
+                let mut cur = [0.0f32; MAX_DIM];
+                cur[..dim].copy_from_slice(&hist[o..o + dim]);
                 let t = (k + 1) as f32 / depth as f32;
                 let alpha = 0.03 + 0.32 * t * t;
                 if have {
-                    self.trail_verts[vp..vp + 5].copy_from_slice(&prev);
+                    self.trail_verts[vp..vp + dim].copy_from_slice(&prev[..dim]);
                     self.trail_cols[cp] = r;
                     self.trail_cols[cp + 1] = g;
                     self.trail_cols[cp + 2] = b;
                     self.trail_cols[cp + 3] = alpha;
-                    vp += 5;
+                    vp += dim;
                     cp += 4;
-                    self.trail_verts[vp..vp + 5].copy_from_slice(&cur);
+                    self.trail_verts[vp..vp + dim].copy_from_slice(&cur[..dim]);
                     self.trail_cols[cp] = r;
                     self.trail_cols[cp + 1] = g;
                     self.trail_cols[cp + 2] = b;
                     self.trail_cols[cp + 3] = alpha;
-                    vp += 5;
+                    vp += dim;
                     cp += 4;
                 }
                 prev = cur;
@@ -455,7 +458,7 @@ impl Flock {
             }
             i = (i + stride) % n;
         }
-        (vp / 5) as u32
+        (vp / dim) as u32
     }
     pub fn trail_verts_ptr(&self) -> *const f32 {
         self.trail_verts.as_ptr()
@@ -468,10 +471,10 @@ impl Flock {
     /// [sy cy sp cp dist fov half cx cy cz |
     ///  sinA cosA sinB cosB sinC cosC isoC isoS slabH slabC |
     ///  touring dim W H nslice fog wp iso base round |
-    ///  tourF(15) tourN(10)]
+    ///  tourF(72) tourN(504)]
     pub fn uniforms(&self, width: f32, height: f32) -> Vec<f32> {
         let u: Uniforms = self.cam.build_uniforms(&self.sim, &self.p, width, height);
-        let mut v = Vec::with_capacity(30 + 15 + 10);
+        let mut v = Vec::with_capacity(30 + PDIM * MAX_DIM + MAX_SLICE_DIMS * MAX_DIM);
         v.push(u.sy);
         v.push(u.cy);
         v.push(u.sp);
@@ -502,13 +505,13 @@ impl Flock {
         v.push(u.iso);
         v.push(u.base);
         v.push(u.round);
-        for i in 0..3 {
-            for k in 0..5 {
+        for i in 0..PDIM {
+            for k in 0..MAX_DIM {
                 v.push(u.tour_f[i][k]);
             }
         }
-        for i in 0..2 {
-            for k in 0..5 {
+        for i in 0..MAX_SLICE_DIMS {
+            for k in 0..MAX_DIM {
                 v.push(u.tour_n[i][k]);
             }
         }
@@ -556,14 +559,14 @@ mod tests {
     fn wrapper_uses_normalized_simulation_state() {
         let mut flock = Flock::new(0, 99, 42);
         assert_eq!(flock.n(), 3);
-        assert_eq!(flock.dim(), 5);
-        assert_eq!(flock.positions_len(), 15);
+        assert_eq!(flock.dim(), 24);
+        assert_eq!(flock.positions_len(), 72);
 
         flock.set_n(1);
         flock.set_dim(0);
         assert_eq!(flock.n(), 3);
         assert_eq!(flock.dim(), 2);
-        assert_eq!(flock.positions_len(), 15);
+        assert_eq!(flock.positions_len(), 6);
     }
 
     #[test]
@@ -582,7 +585,7 @@ mod tests {
 
     #[test]
     fn orbit_rotates_every_spatial_view_except_2d() {
-        for dim in 2..=5 {
+        for dim in [2, 3, 4, 5, 8, 24] {
             let mut flock = Flock::new(3, dim, 42);
             let initial_yaw = flock.cam.yaw;
             let initial_pitch = flock.cam.pitch;
@@ -596,6 +599,37 @@ mod tests {
                 assert_ne!(flock.cam.yaw, initial_yaw);
                 assert_ne!(flock.cam.pitch, initial_pitch);
             }
+        }
+    }
+
+    #[test]
+    fn zoom_supports_close_views_and_clamps_invalid_extremes() {
+        let mut flock = Flock::new(3, 3, 42);
+
+        flock.set_zoom(48.0);
+        assert_eq!(flock.zoom(), 48.0);
+        flock.set_zoom(100.0);
+        assert_eq!(flock.zoom(), 64.0);
+        flock.set_zoom(0.0);
+        assert_eq!(flock.zoom(), 0.15);
+    }
+
+    #[test]
+    fn zoom_scales_projection_equally_in_every_dimension() {
+        for dim in [2, 3, 5, 8, 24] {
+            let mut flock = Flock::new(3, dim, 42);
+            flock.set_rock(false);
+            flock.update_camera(1000.0, 800.0);
+            let initial = flock.uniforms(1000.0, 800.0);
+            let initial_scale = initial[5] / initial[4] * initial[6] / (800.0 * 0.36);
+
+            flock.set_zoom(4.0);
+            flock.update_camera(1000.0, 800.0);
+            let zoomed = flock.uniforms(1000.0, 800.0);
+            let zoomed_scale = zoomed[5] / zoomed[4] * zoomed[6] / (800.0 * 0.36);
+
+            assert!((zoomed_scale / initial_scale - 4.0).abs() < 1e-5);
+            assert!((zoomed[4] - initial[4]).abs() < 1e-5);
         }
     }
 

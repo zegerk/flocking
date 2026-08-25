@@ -1,5 +1,4 @@
 export const TRAIL_GEOMETRY_BYTE_BUDGET = 256 * 1024 * 1024;
-const TRAIL_VERTEX_BYTES = (5 + 4) * 4 * 2;
 export const TRAIL_FPS_FLOOR = 10;
 export const TRAIL_FPS_RECOVER = 12;
 export const TRAIL_HISTORY_BYTE_BUDGET = 256 * 1024 * 1024;
@@ -12,16 +11,17 @@ export function populationForSliderValue(value) {
   return Math.max(3, Math.round(3 * Math.pow(MAX_POPULATION / 3, position / 1000)));
 }
 
-export function maxPopulationForTrailLength(frames) {
+export function maxPopulationForTrailLength(frames, dim = 5) {
   const length = Math.max(MIN_TRAIL_FRAMES, Math.min(MAX_TRAIL_FRAMES, Math.floor(frames)));
+  const stride = Math.max(2, Math.min(24, Math.floor(dim)));
   return Math.min(
     MAX_POPULATION,
-    Math.max(3, Math.floor(TRAIL_HISTORY_BYTE_BUDGET / (length * 5 * 4))),
+    Math.max(3, Math.floor(TRAIL_HISTORY_BYTE_BUDGET / (length * stride * 4))),
   );
 }
 
-export function maxPopulationSliderValue(frames) {
-  const limit = maxPopulationForTrailLength(frames);
+export function maxPopulationSliderValue(frames, dim = 5) {
+  const limit = maxPopulationForTrailLength(frames, dim);
   let low = 0;
   let high = 1000;
   while (low < high) {
@@ -32,11 +32,13 @@ export function maxPopulationSliderValue(frames) {
   return low;
 }
 
-export function calculateTrailBudget(population, requestedQuality, trailSlots) {
+export function calculateTrailBudget(population, requestedQuality, trailSlots, dim = 5) {
   const count = Math.max(0, Math.floor(population));
   const quality = Math.max(0, Math.min(1, requestedQuality));
   const verticesPerTrail = Math.max(1, (Math.floor(trailSlots) - 1) * 2);
-  const safeVertices = Math.floor(TRAIL_GEOMETRY_BYTE_BUDGET / TRAIL_VERTEX_BYTES);
+  const stride = Math.max(2, Math.min(24, Math.floor(dim)));
+  const trailVertexBytes = (stride + 4) * 4 * 2;
+  const safeVertices = Math.floor(TRAIL_GEOMETRY_BYTE_BUDGET / trailVertexBytes);
   const safeCount = Math.floor(safeVertices / verticesPerTrail);
   const requestedCount = quality >= 1 ? count : Math.floor(count * quality);
   const selected = Math.min(count, requestedCount, safeCount);

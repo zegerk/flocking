@@ -4,7 +4,7 @@
 //! vertex shader each frame.
 
 use crate::sim::Sim;
-use crate::tour::{AMB, PDIM};
+use crate::tour::{MAX_DIM, MAX_SLICE_DIMS, PDIM};
 
 pub struct Camera {
     pub yaw: f32,
@@ -66,8 +66,8 @@ pub struct Uniforms {
     pub iso: f32,  // isoclinic on
     pub base: f32, // dot base size
     pub round: f32,
-    pub tour_f: [[f32; AMB]; PDIM],
-    pub tour_n: [[f32; AMB]; 2],
+    pub tour_f: [[f32; MAX_DIM]; PDIM],
+    pub tour_n: [[f32; MAX_DIM]; MAX_SLICE_DIMS],
 }
 
 pub struct CamParams {
@@ -146,52 +146,28 @@ impl Camera {
         let (mut tx, mut ty, mut tz) = (0.0f32, 0.0f32, 0.0f32);
         let mut r = 0.87f32;
         if p.fit {
-            let (mut x0, mut y0, mut z0) = (-0.5f32, -0.5f32, -0.5f32);
-            let (mut x1, mut y1, mut z1) = (0.5f32, 0.5f32, 0.5f32);
-            let (mut w0, mut w1) = (0.0f32, 0.0f32);
-            let (mut v0, mut v1) = (0.0f32, 0.0f32);
+            let dim = dim as usize;
+            let mut mins = [0.0f32; MAX_DIM];
+            let mut maxs = [0.0f32; MAX_DIM];
+            for k in 0..dim.min(3) {
+                mins[k] = -0.5;
+                maxs[k] = 0.5;
+            }
             for i in 0..sim.n {
-                let (x, y, z, w, v) = (sim.xs[i], sim.ys[i], sim.zs[i], sim.ws[i], sim.vs[i]);
-                if x < x0 {
-                    x0 = x;
-                }
-                if x > x1 {
-                    x1 = x;
-                }
-                if y < y0 {
-                    y0 = y;
-                }
-                if y > y1 {
-                    y1 = y;
-                }
-                if z < z0 {
-                    z0 = z;
-                }
-                if z > z1 {
-                    z1 = z;
-                }
-                if w < w0 {
-                    w0 = w;
-                }
-                if w > w1 {
-                    w1 = w;
-                }
-                if v < v0 {
-                    v0 = v;
-                }
-                if v > v1 {
-                    v1 = v;
+                let offset = i * dim;
+                for k in 0..dim {
+                    mins[k] = mins[k].min(sim.pos[offset + k]);
+                    maxs[k] = maxs[k].max(sim.pos[offset + k]);
                 }
             }
-            tx = (x0 + x1) / 2.0;
-            ty = (y0 + y1) / 2.0;
-            tz = (z0 + z1) / 2.0;
-            r = (x1 - x0)
-                .max(y1 - y0)
-                .max(z1 - z0)
-                .max(if dim >= 4 { w1 - w0 } else { 0.0 })
-                .max(if dim >= 5 { v1 - v0 } else { 0.0 })
-                .max(0.2)
+            tx = (mins[0] + maxs[0]) / 2.0;
+            ty = (mins[1] + maxs[1]) / 2.0;
+            tz = if dim >= 3 { (mins[2] + maxs[2]) / 2.0 } else { 0.0 };
+            r = mins[..dim]
+                .iter()
+                .zip(&maxs[..dim])
+                .map(|(&min, &max)| max - min)
+                .fold(0.2f32, f32::max)
                 * 0.62;
             if sim.touring_active() {
                 tx = 0.0;
@@ -206,9 +182,10 @@ impl Camera {
         self.radius += (r - self.radius) * k;
         self.init = true;
 
-        self.half = width.min(height) * 0.36 * self.zoom;
+        let base_half = width.min(height) * 0.36;
+        self.half = base_half * self.zoom;
         self.fov = width.min(height) * 0.9 * p.lens;
-        self.dist = self.radius * (self.fov / self.half.max(1.0) + 1.0);
+        self.dist = self.radius * (self.fov / base_half.max(1.0) + 1.0);
 
         // Advance grand tour if active.
         if sim.touring_active() && p.running {

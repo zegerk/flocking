@@ -78,6 +78,36 @@ That command loads `.env`, creates an optimised Trunk build, and runs
 the current shell, use `npm run deploy`. To preview the production build
 locally through Wrangler, use `npm run cf:dev`.
 
+## Versioning and releases
+
+`package.json` is the canonical version. `npm run version:check` verifies that
+the npm lockfile, Cargo manifest and lockfile, and changelog agree with it.
+This project uses strict `X.Y.Z` SemVer, including before 1.0: patch is for
+compatible fixes, minor for compatible features, and major for breaking or
+removal changes. Compatibility covers the deployed controls and behaviour,
+documented workflows, build/deploy contract, and public wasm/JavaScript
+boundary; internal refactors alone do not require a major version.
+
+Add a categorized entry under `[Unreleased]` in `CHANGELOG.md` while developing.
+The local release command only synchronizes and validates files: it never
+commits, tags, pushes, deploys, creates a GitHub Release, or rolls changes back.
+
+```sh
+npm run verify
+# Commit all development and changelog changes on main first.
+npm run release -- minor --dry-run
+npm run release -- minor
+# Review the diff, then commit as: release: vX.Y.Z
+git tag -a vX.Y.Z -m "vX.Y.Z"
+git push origin main vX.Y.Z
+npm run deploy:env
+```
+
+Choose `patch`, `minor`, or `major` explicitly. The command requires a clean
+`main` worktree, the current annotated `vX.Y.Z` baseline tag, an unused target
+tag, synchronized metadata, and at least one categorized Unreleased entry.
+Prerelease channels and pre-0.1.12 history reconstruction are out of scope.
+
 ## Tour of the source
 
 ```
@@ -100,11 +130,12 @@ The dock on the left (see `index.html`) exposes:
 
 - **Play/pause** and **step speed** — drive the `for _ in 0..speed { sim.step() }`
   loop in JS.
-- **Dimensions** (2D → 5D) — rules run in up to 5D; the camera grand tour and
-  vertex shader project the higher-dimensional state into the visible 3D view.
+- **Dimensions** (2D, 3D, 4D, 5D, 8D, 24D) — rules run across every active axis;
+  the grand tour projects 8D and 24D state into the visible 3D view.
 - **Colour modes** — friend/enemy palette, complementary ramp, cyclic, and a
   couple of single-tone themes.
-- **Camera** — rock, spin, auto-fit, lens/fog toggles, manual 4D-5D chain.
+- **Camera** — rock, spin, auto-fit, lens/fog toggles, manual 4D-5D chain, and
+  automatic grand tours for 8D/24D.
 - **Trails / links / floor / shadows** — drawn by the JS renderer from per-frame
   geometry produced in wasm. Trail length is adjustable from 2 to 120 rendered
   frames; complete trails are sampled automatically only when needed to keep

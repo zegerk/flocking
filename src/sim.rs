@@ -2,27 +2,27 @@
 //! buffer, and the functional-graph analyse (components / cycle / depth).
 
 use crate::rng::Rng;
-use crate::tour::{Tour, AMB};
+use crate::tour::Tour;
 
-pub const STR: usize = 5;
 pub const MIN_TRAIL_FRAMES: usize = 2;
 pub const DEFAULT_TRAIL_FRAMES: usize = 30;
 pub const MAX_TRAIL_FRAMES: usize = 120;
 pub const TRAIL_HISTORY_BYTE_BUDGET: usize = 256 * 1024 * 1024;
 const MIN_POPULATION: usize = 3;
 const MAX_POPULATION: usize = 1_000_000;
-const MIN_DIMENSION: u32 = 2;
-const MAX_DIMENSION: u32 = AMB as u32;
+pub const MIN_DIMENSION: u32 = 2;
+pub const MAX_DIMENSION: u32 = 24;
 
-pub fn max_population_for_trail_length(frames: usize) -> usize {
+pub fn max_population_for_trail_length(frames: usize, dim: u32) -> usize {
     let frames = frames.clamp(MIN_TRAIL_FRAMES, MAX_TRAIL_FRAMES);
-    (TRAIL_HISTORY_BYTE_BUDGET / (frames * STR * size_of::<f32>()))
+    let dim = normalize_dimension(dim) as usize;
+    (TRAIL_HISTORY_BYTE_BUDGET / (frames * dim * size_of::<f32>()))
         .clamp(MIN_POPULATION, MAX_POPULATION)
 }
 
-fn normalize_population(n: usize, trail_capacity: usize) -> usize {
+fn normalize_population(n: usize, trail_capacity: usize, dim: u32) -> usize {
     n.max(MIN_POPULATION)
-        .min(max_population_for_trail_length(trail_capacity))
+        .min(max_population_for_trail_length(trail_capacity, dim))
 }
 
 fn normalize_dimension(dim: u32) -> u32 {
@@ -54,19 +54,9 @@ pub struct Sim {
     pub law_prop: bool, // true = proportional step, false = fixed-length (unit)
     pub speed: u32,     // steps per frame
 
-    // Position arrays (5 dims, only first `dim` used meaningfully).
-    pub xs: Vec<f32>,
-    pub ys: Vec<f32>,
-    pub zs: Vec<f32>,
-    pub ws: Vec<f32>,
-    pub vs: Vec<f32>,
-
-    // Accel / next-position temps.
-    ax: Vec<f32>,
-    ay: Vec<f32>,
-    az: Vec<f32>,
-    aw: Vec<f32>,
-    av: Vec<f32>,
+    // Row-major positions: agent i occupies pos[i * dim..(i + 1) * dim].
+    pub pos: Vec<f32>,
+    next_pos: Vec<f32>,
 
     // Graph.
     pub fr: Vec<i32>,
@@ -102,7 +92,7 @@ pub struct Sim {
     /// Maximum in-degree bucket currently observed (for the legend). 0..=3.
     pub ind_max: u8,
 
-    // Trail ring buffer: trail_capacity slots × n × STR.
+    // Trail ring buffer: trail_capacity slots × n × dim.
     pub hist: Vec<f32>,
     trail_capacity: usize,
     head: usize,
@@ -118,8 +108,8 @@ pub struct Sim {
 impl Sim {
     pub fn new(n: usize, dim: u32, seed: u64) -> Self {
         let trail_capacity = DEFAULT_TRAIL_FRAMES;
-        let n = normalize_population(n, trail_capacity);
         let dim = normalize_dimension(dim);
+        let n = normalize_population(n, trail_capacity, dim);
         let mut s = Sim {
             n,
             dim,
@@ -133,16 +123,8 @@ impl Sim {
             tour_on: false,
             law_prop: false,
             speed: 1,
-            xs: vec![0.0; n],
-            ys: vec![0.0; n],
-            zs: vec![0.0; n],
-            ws: vec![0.0; n],
-            vs: vec![0.0; n],
-            ax: vec![0.0; n],
-            ay: vec![0.0; n],
-            az: vec![0.0; n],
-            aw: vec![0.0; n],
-            av: vec![0.0; n],
+            pos: vec![0.0; n * dim as usize],
+            next_pos: vec![0.0; n * dim as usize],
             fr: vec![0; n],
             en: vec![0; n],
             hu: vec![0; n],
@@ -161,7 +143,7 @@ impl Sim {
             comp_size: Vec::new(),
             ind: vec![0; n],
             ind_max: 0,
-            hist: vec![0.0; n * trail_capacity * STR],
+            hist: vec![0.0; n * trail_capacity * dim as usize],
             trail_capacity,
             head: 0,
             hlen: 0,
@@ -176,13 +158,13 @@ impl Sim {
     }
 
     pub fn resize(&mut self, n: usize) {
-        self.n = normalize_population(n, self.trail_capacity);
+        self.n = normalize_population(n, self.trail_capacity, self.dim);
         self.build();
     }
 
     pub fn set_trail_capacity(&mut self, frames: usize) {
         let capacity = frames.clamp(MIN_TRAIL_FRAMES, MAX_TRAIL_FRAMES);
-        let max_population = max_population_for_trail_length(capacity);
+        let max_population = max_population_for_trail_length(capacity, self.dim);
         if self.n > max_population {
             self.n = max_population;
             self.trail_capacity = capacity;
@@ -190,7 +172,7 @@ impl Sim {
             return;
         }
         self.trail_capacity = capacity;
-        self.hist = vec![0.0; self.n * self.trail_capacity * STR];
+        self.hist = vec![0.0; self.n * self.trail_capacity * self.dim as usize];
         self.head = 0;
         self.hlen = 0;
     }
@@ -219,16 +201,9 @@ impl Sim {
 
     pub fn build(&mut self) {
         let n = self.n;
-        self.xs = vec![0.0; n];
-        self.ys = vec![0.0; n];
-        self.zs = vec![0.0; n];
-        self.ws = vec![0.0; n];
-        self.vs = vec![0.0; n];
-        self.ax = vec![0.0; n];
-        self.ay = vec![0.0; n];
-        self.az = vec![0.0; n];
-        self.aw = vec![0.0; n];
-        self.av = vec![0.0; n];
+        let dim = self.dim as usize;
+        self.pos = vec![0.0; n * dim];
+        self.next_pos = vec![0.0; n * dim];
         self.fr = vec![0; n];
         self.en = vec![0; n];
         self.hu = vec![0; n];
@@ -244,29 +219,15 @@ impl Sim {
         self.comp_size = Vec::new();
         self.ind = vec![0; n];
         self.ind_max = 0;
-        self.hist = vec![0.0; n * self.trail_capacity * STR];
+        self.hist = vec![0.0; n * self.trail_capacity * dim];
         self.head = 0;
         self.hlen = 0;
 
         let pal_len = 5usize; // PAL.length in JS
         for i in 0..n {
-            self.xs[i] = self.rng.next_f32() - 0.5;
-            self.ys[i] = self.rng.next_f32() - 0.5;
-            self.zs[i] = if self.dim < 3 {
-                0.0
-            } else {
-                self.rng.next_f32() - 0.5
-            };
-            self.ws[i] = if self.dim < 4 {
-                0.0
-            } else {
-                self.rng.next_f32() - 0.5
-            };
-            self.vs[i] = if self.dim < 5 {
-                0.0
-            } else {
-                self.rng.next_f32() - 0.5
-            };
+            for value in &mut self.pos[i * dim..(i + 1) * dim] {
+                *value = self.rng.next_f32() - 0.5;
+            }
             self.hu[i] = self.rng.below(pal_len) as u8;
             self.pick(i);
             self.flash[i] = 0.0;
@@ -278,95 +239,58 @@ impl Sim {
 
     pub fn set_dim(&mut self, dim: u32) {
         self.dim = normalize_dimension(dim);
+        self.n = normalize_population(self.n, self.trail_capacity, self.dim);
         self.tour.reset(self.dim);
         self.build();
     }
 
     fn meas(&mut self) {
-        let mut s = 0.0f32;
-        for i in 0..self.n {
-            s += self.xs[i] * self.xs[i]
-                + self.ys[i] * self.ys[i]
-                + self.zs[i] * self.zs[i]
-                + self.ws[i] * self.ws[i]
-                + self.vs[i] * self.vs[i];
-        }
+        let s = self.pos.iter().map(|value| value * value).sum::<f32>();
         self.spread = (s / self.n as f32).sqrt();
     }
 
     pub fn step(&mut self) {
         let (a, b, c, n) = (self.f, self.e, self.c, self.n);
+        let dim = self.dim as usize;
         let prop = self.law_prop;
-        let flat = self.dim == 2;
-        let k4 = self.dim >= 4;
-        let k5 = self.dim >= 5;
         // Per-frame maximum resets each step so colour mode 4 reflects the
         // current frame's speed distribution rather than a growing envelope.
         let mut frame_spd_max = 0.0f32;
 
         for i in 0..n {
-            let x = self.xs[i];
-            let y = self.ys[i];
-            let z = self.zs[i];
-            let w = self.ws[i];
-            let v = self.vs[i];
             let f = self.fr[i] as usize;
             let e = self.en[i] as usize;
-
-            let mut dx = -c * x;
-            let mut dy = -c * y;
-            let mut dz = -c * z;
-            let mut dw = -c * w;
-            let mut dvv = -c * v;
-
-            let fx = self.xs[f] - x;
-            let fy = self.ys[f] - y;
-            let fz = self.zs[f] - z;
-            let fw = self.ws[f] - w;
-            let fv = self.vs[f] - v;
-            let ex = self.xs[e] - x;
-            let ey = self.ys[e] - y;
-            let ez = self.zs[e] - z;
-            let ew = self.ws[e] - w;
-            let ev = self.vs[e] - v;
-
-            if !prop {
-                // fixed-length: friend capped at min(a,d), enemy constant b
-                let d = (fx * fx + fy * fy + fz * fz + fw * fw + fv * fv).sqrt();
-                if d > 1e-9 {
-                    let s1 = a.min(d) / d;
-                    dx += s1 * fx;
-                    dy += s1 * fy;
-                    dz += s1 * fz;
-                    dw += s1 * fw;
-                    dvv += s1 * fv;
-                }
-                let d = (ex * ex + ey * ey + ez * ez + ew * ew + ev * ev).sqrt();
-                if d > 1e-9 {
-                    let s2 = b / d;
-                    dx -= s2 * ex;
-                    dy -= s2 * ey;
-                    dz -= s2 * ez;
-                    dw -= s2 * ew;
-                    dvv -= s2 * ev;
-                }
+            let io = i * dim;
+            let fo = f * dim;
+            let eo = e * dim;
+            let (friend_scale, enemy_scale) = if prop {
+                (a, b)
             } else {
-                // proportional: step scales with gap (linear, unbounded)
-                dx += a * fx - b * ex;
-                dy += a * fy - b * ey;
-                dz += a * fz - b * ez;
-                dw += a * fw - b * ew;
-                dvv += a * fv - b * ev;
-            }
+                let mut friend_dist_sq = 0.0;
+                let mut enemy_dist_sq = 0.0;
+                for k in 0..dim {
+                    let friend_gap = self.pos[fo + k] - self.pos[io + k];
+                    let enemy_gap = self.pos[eo + k] - self.pos[io + k];
+                    friend_dist_sq += friend_gap * friend_gap;
+                    enemy_dist_sq += enemy_gap * enemy_gap;
+                }
+                let friend_dist = friend_dist_sq.sqrt();
+                let enemy_dist = enemy_dist_sq.sqrt();
+                (
+                    if friend_dist > 1e-9 { a.min(friend_dist) / friend_dist } else { 0.0 },
+                    if enemy_dist > 1e-9 { b / enemy_dist } else { 0.0 },
+                )
+            };
 
-            self.ax[i] = x + dx;
-            self.ay[i] = y + dy;
-            self.az[i] = if flat { 0.0 } else { z + dz };
-            self.aw[i] = if k4 { w + dw } else { 0.0 };
-            self.av[i] = if k5 { v + dvv } else { 0.0 };
-            // Squared step magnitude (only active dims contribute: dim 2/4/5
-            // force dz/dvv to 0 above). Consumed by colour mode 4 (speed).
-            let s = dx * dx + dy * dy + dz * dz + dw * dw + dvv * dvv;
+            let mut s = 0.0;
+            for k in 0..dim {
+                let value = self.pos[io + k];
+                let friend_gap = self.pos[fo + k] - value;
+                let enemy_gap = self.pos[eo + k] - value;
+                let delta = -c * value + friend_scale * friend_gap - enemy_scale * enemy_gap;
+                self.next_pos[io + k] = value + delta;
+                s += delta * delta;
+            }
             self.spd[i] = s;
             if s > frame_spd_max {
                 frame_spd_max = s;
@@ -375,12 +299,8 @@ impl Sim {
         }
         self.spd_max = frame_spd_max;
 
-        for i in 0..n {
-            self.xs[i] = clamp_pos(self.ax[i]);
-            self.ys[i] = clamp_pos(self.ay[i]);
-            self.zs[i] = clamp_pos(self.az[i]);
-            self.ws[i] = clamp_pos(self.aw[i]);
-            self.vs[i] = clamp_pos(self.av[i]);
+        for (position, &next) in self.pos.iter_mut().zip(&self.next_pos) {
+            *position = clamp_pos(next);
         }
 
         if self.rng.next_f64() < 1.0 / self.iv as f64 {
@@ -392,15 +312,9 @@ impl Sim {
     }
 
     pub fn capture_trail_frame(&mut self) {
-        let base = self.head * self.n * STR;
-        for i in 0..self.n {
-            let o = base + i * STR;
-            self.hist[o] = self.xs[i];
-            self.hist[o + 1] = self.ys[i];
-            self.hist[o + 2] = self.zs[i];
-            self.hist[o + 3] = self.ws[i];
-            self.hist[o + 4] = self.vs[i];
-        }
+        let frame_len = self.n * self.dim as usize;
+        let base = self.head * frame_len;
+        self.hist[base..base + frame_len].copy_from_slice(&self.pos);
         self.head = (self.head + 1) % self.trail_capacity;
         if self.hlen < self.trail_capacity {
             self.hlen += 1;
@@ -600,7 +514,7 @@ impl Sim {
         }
     }
 
-    /// Mirrors JS `touring()`: grand tour active only in 4D/5D with tour on.
+    /// Grand tour is active in any dimension above 3 when enabled.
     pub fn touring_active(&self) -> bool {
         self.tour_on && self.dim >= 4
     }
@@ -619,17 +533,9 @@ impl Sim {
     }
 }
 
-/// Pack the 5 per-dim arrays into one interleaved [x,y,z,w,v] * n buffer for a
-/// single GL upload. The renderer wants a stride-5 layout.
+/// Copy the row-major positions into the persistent GL upload buffer.
 pub fn pack_positions(sim: &Sim, out: &mut [f32]) {
-    for i in 0..sim.n {
-        let o = i * AMB;
-        out[o] = sim.xs[i];
-        out[o + 1] = sim.ys[i];
-        out[o + 2] = sim.zs[i];
-        out[o + 3] = sim.ws[i];
-        out[o + 4] = sim.vs[i];
-    }
+    out[..sim.pos.len()].copy_from_slice(&sim.pos);
 }
 
 #[cfg(test)]
@@ -658,7 +564,7 @@ mod tests {
             assert_eq!(sim.dim, MIN_DIMENSION);
         }
 
-        let mut sim = Sim::new(8, 9, 42);
+        let mut sim = Sim::new(8, 99, 42);
         assert_eq!(sim.dim, MAX_DIMENSION);
         sim.resize(1);
         assert_eq!(sim.n, MIN_POPULATION);
@@ -692,14 +598,15 @@ mod tests {
 
         sim.set_trail_capacity(999);
         assert_eq!(sim.trail_capacity(), MAX_TRAIL_FRAMES);
-        assert_eq!(sim.hist.len(), sim.n * MAX_TRAIL_FRAMES * STR);
+        assert_eq!(sim.hist.len(), sim.n * MAX_TRAIL_FRAMES * sim.dim as usize);
     }
 
     #[test]
     fn trail_history_budget_limits_population() {
-        assert_eq!(max_population_for_trail_length(2), 1_000_000);
-        assert_eq!(max_population_for_trail_length(30), 447_392);
-        assert_eq!(max_population_for_trail_length(120), 111_848);
+        assert_eq!(max_population_for_trail_length(2, 5), 1_000_000);
+        assert_eq!(max_population_for_trail_length(30, 5), 447_392);
+        assert_eq!(max_population_for_trail_length(120, 5), 111_848);
+        assert_eq!(max_population_for_trail_length(30, 24), 93_206);
     }
 
     #[test]
@@ -717,14 +624,25 @@ mod tests {
             sim.step();
         }
 
-        for values in [&sim.xs, &sim.ys, &sim.zs, &sim.ws, &sim.vs] {
-            assert_eq!(values.len(), sim.n);
-            assert!(values.iter().all(|value| value.is_finite()));
-        }
-        assert_eq!(sim.hist.len(), sim.n * DEFAULT_TRAIL_FRAMES * STR);
+        assert_eq!(sim.pos.len(), sim.n * sim.dim as usize);
+        assert!(sim.pos.iter().all(|value| value.is_finite()));
+        assert_eq!(sim.hist.len(), sim.n * DEFAULT_TRAIL_FRAMES * sim.dim as usize);
         assert_eq!(sim.spd.len(), sim.n);
         assert!(sim.spd.iter().all(|value| value.is_finite()));
         assert!(sim.spread.is_finite());
         assert_graph_invariants(&sim);
+    }
+
+    #[test]
+    fn stepping_keeps_24d_state_finite() {
+        let mut sim = Sim::new(9, 24, 1);
+        for _ in 0..200 {
+            sim.step();
+        }
+        sim.capture_trail_frame();
+
+        assert_eq!(sim.pos.len(), sim.n * 24);
+        assert!(sim.pos.iter().all(|value| value.is_finite()));
+        assert_eq!(sim.trail_len(), 1);
     }
 }

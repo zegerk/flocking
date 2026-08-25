@@ -3,11 +3,12 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="description" content="An interactive swarm simulation where dots move toward a friend, away from an enemy, and form shifting patterns in up to five dimensions.">
+<meta name="description" content="An interactive swarm simulation where dots move toward a friend, away from an enemy, and form shifting patterns in up to twenty-four dimensions.">
 <title>Friends &amp; Enemies</title>
 <link data-trunk rel="rust" data-wasm-opt="z" />
 <link data-trunk rel="copy-file" href="glue.js" />
 <link data-trunk rel="copy-file" href="trail-quality.mjs" />
+<link data-trunk rel="copy-file" href="version-display.mjs" />
 <style>
   :root{
     --field:#10171b; --field-2:#0b1114; --rule:#22313a;
@@ -81,8 +82,9 @@
   .readout div{display:flex;justify-content:space-between;color:var(--muted)}
   .readout b{color:var(--ink);font-weight:500;font-variant-numeric:tabular-nums}
   .note{color:var(--muted);font-size:10.5px;line-height:1.6;margin:0}
-  .source{border-top:1px solid var(--rule);padding-top:12px;text-align:center}
-  .source a{color:var(--muted);text-decoration:none;text-transform:uppercase;font-size:10px;letter-spacing:.14em}
+  .source{border-top:1px solid var(--rule);padding-top:12px;text-align:center;display:flex;justify-content:center;gap:12px}
+  .source a,.source span{color:var(--muted);text-decoration:none;font-size:10px;letter-spacing:.14em}
+  .source a{text-transform:uppercase}
   .source a:hover{color:var(--ink)}
   .source a:focus-visible{outline:1px solid var(--saffron);outline-offset:4px}
   .key{display:flex;gap:4px;align-items:center;margin:0 0 4px}
@@ -136,11 +138,10 @@
       Every dot picks one <b>friend</b> and one <b>enemy</b>, and knows nothing else.
       Each step it drifts a little toward the centre of the room, takes a <b>large step</b>
       toward its friend and a <b>small step</b> away from its enemy. Now and then one dot re-picks.
-      The same rules run in <b>2, 3, 4, or 5 dimensions</b> — pick a space with the buttons below.
-      Only three axes are drawn at a time, so in 4D/5D use the <b>turn</b> sliders to swing the
-      hidden axes into view, the <b>slab</b> sliders to slice a section of them, or enable the
-      <b>grand tour</b> to walk through every projection automatically.
-      <b>Drag to orbit, scroll to zoom.</b>
+      The same rules run in <b>2, 3, 4, 5, 8, or 24 dimensions</b> — pick a space below.
+      Only three axes are drawn at a time: 4D/5D offer manual turns and slicing, while
+      8D/24D use the <b>grand tour</b> to walk through projections automatically.
+      <b>Drag to orbit, scroll or pinch to zoom.</b>
     </p>
   </div>
 
@@ -151,8 +152,11 @@
       <button id="d-3" aria-pressed="true">3d</button>
       <button id="d-4" aria-pressed="false">4d</button>
       <button id="d-5" aria-pressed="false">5d</button>
+      <button id="d-8" aria-pressed="false">8d</button>
+      <button id="d-24" aria-pressed="false">24d</button>
     </div>
-    <p class="note">2D holds z at zero and locks the camera face-on. 3D is the full room. In 4D and 5D the extra axes (w, v) are invisible until you swing them in with the turn sliders below, slice them with the slab, or let the grand tour rotate through every projection.</p>
+    <p class="note" id="low-dim-note">2D holds z at zero and locks the camera face-on. 3D is the full room. In 4D and 5D the extra axes (w, v) are invisible until you swing them in with the turn sliders below, slice them with the slab, or let the grand tour rotate through every projection.</p>
+    <p class="note" id="high-dim-note" hidden>Grand tour walks through the high-dimensional projections automatically.</p>
     <div id="wgroup" style="display:none;flex-direction:column;gap:11px">
       <div class="ctl">
         <div class="ctl-top"><span>turn x into w</span><span class="val" id="v-wa"></span></div>
@@ -301,9 +305,10 @@
     <div><span>trails</span><b id="r-trails">100%</b></div>
   </div>
 
-  <p class="note">Space pauses. R resets. R with shift re-picks all. H hides this panel. Drag to orbit, scroll to zoom.</p>
+  <p class="note">Space pauses. R resets. R with shift re-picks all. H hides this panel. Drag to orbit, scroll or pinch to zoom.</p>
   <div class="source">
     <a href="https://github.com/zegerk/flocking" target="_blank" rel="noopener noreferrer" aria-label="View Friends and Enemies source code on GitHub">GitHub</a>
+    <span id="app-version" hidden></span>
   </div>
 </aside>
 <button id="toggle" aria-expanded="true" aria-controls="panel">Hide</button>

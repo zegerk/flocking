@@ -11,6 +11,7 @@ import {
   populationForSliderValue,
   trailQualityLabel,
 } from './trail-quality.mjs';
+import { formatBuildVersion } from './version-display.mjs';
 
 // ---- palettes ----
 // Four named sets. Each set supplies the four mode palettes:
@@ -122,30 +123,46 @@ function palFloats(mode, set=palSet){ return palCache[set][mode]; }
 
 const FIELD = (()=>{const[r,g,b]=hexToRgb(cssVar('field'));return [r,g,b,1];})();
 
-// ---- shared GLSL: the full projection chain, one function ----
-// Returns screen NDC + sets out params. Mirrors project()/screenPass() in the
-// canvas2d reference, including the tour frame and the manual w/v chain.
+const POSITION_INPUTS = `
+layout(location=0) in vec4 aP0;
+layout(location=1) in vec4 aP1;
+layout(location=2) in vec4 aP2;
+layout(location=3) in vec4 aP3;
+layout(location=4) in vec4 aP4;
+layout(location=5) in vec4 aP5;
+void loadPosition(out float p[24]){
+  p[0]=aP0.x;p[1]=aP0.y;p[2]=aP0.z;p[3]=aP0.w;
+  p[4]=aP1.x;p[5]=aP1.y;p[6]=aP1.z;p[7]=aP1.w;
+  p[8]=aP2.x;p[9]=aP2.y;p[10]=aP2.z;p[11]=aP2.w;
+  p[12]=aP3.x;p[13]=aP3.y;p[14]=aP3.z;p[15]=aP3.w;
+  p[16]=aP4.x;p[17]=aP4.y;p[18]=aP4.z;p[19]=aP4.w;
+  p[20]=aP5.x;p[21]=aP5.y;p[22]=aP5.z;p[23]=aP5.w;
+}
+`;
+
+// ---- shared GLSL: dynamic N-dimensional projection chain ----
 const PROJ = `
 uniform float uSy,uCy,uSp,uCp,uDist,uFov,uHalf,uCx,uCyC,uCz;
 uniform float uSinA,uCosA,uSinB,uCosB,uSinC,uCosC,uIsoC,uIsoS;
 uniform float uSlabH,uSlabC,uTouring,uDim,uW,uH,uNslice,uFog,uWp,uIso,uBase,uRound;
-uniform vec3 uTourF0,uTourF1,uTourF2;
-uniform vec2 uTourF0b,uTourF1b,uTourF2b;
-uniform vec3 uTourN0,uTourN1;
-uniform vec2 uTourN0b,uTourN1b;
+uniform float uTourF[72];
+uniform float uTourN[504];
 
-// Project a 5-vector to clip space. ok=false culls (behind camera / outside slab).
-vec4 proj(vec3 p3, vec2 p2, out float ps, out float pd, out bool ok){
-  float x=p3.x,y=p3.y,z=p3.z,w=p2.x,v=p2.y;
+vec4 proj(float p[24], out float ps, out float pd, out bool ok){
+  float x=p[0],y=p[1],z=p[2],w=p[3],v=p[4];
   float ax,ay,az,aw=w,av=v;
   ok=true; ps=1.0; pd=1.0;
   if(uTouring>0.5){
-    ax=uTourF0.x*x+uTourF0.y*y+uTourF0.z*z+uTourF0b.x*w+uTourF0b.y*v;
-    ay=uTourF1.x*x+uTourF1.y*y+uTourF1.z*z+uTourF1b.x*w+uTourF1b.y*v;
-    az=uTourF2.x*x+uTourF2.y*y+uTourF2.z*z+uTourF2b.x*w+uTourF2b.y*v;
+    ax=0.0;ay=0.0;az=0.0;
+    for(int k=0;k<24;k++){
+      if(float(k)>=uDim) break;
+      ax+=uTourF[k]*p[k];
+      ay+=uTourF[24+k]*p[k];
+      az+=uTourF[48+k]*p[k];
+    }
   } else {
     ax=x-uCx; ay=y-uCyC; az=z-uCz;
-    if(uDim>3.5){
+    if(uDim>3.5 && uDim<6.5){
       if(uIso>0.5){
         float c1=uIsoC,s1=uIsoS;
         float rx=ax*c1-ay*s1, ry=ax*s1+ay*c1;
@@ -178,27 +195,31 @@ vec4 proj(vec3 p3, vec2 p2, out float ps, out float pd, out bool ok){
   // line bug). Clamping keeps the projected point finite and roughly in place;
   // the caller still sees ok=false and zeroes the alpha so nothing shows.
   if(d<0.02){ ok=false; d=0.02; }
-  ps=uFov/d; pd=d;
+  float zoom=uHalf/max(min(uW,uH)*0.36,1.0);
+  ps=uFov/d*zoom; pd=d;
   float sx=uW*0.5+x1*ps;
   float sy=uH*0.5+y2*ps;
   return vec4(sx/uW*2.0-1.0, 1.0-sy/uH*2.0, 0.0, 1.0);
 }
 
 // slab slice test (tour: orthogonal-space; non-tour 4d/5d: |w|,|v| window)
-bool sliceCull(vec3 p3, vec2 p2){
+bool sliceCull(float p[24]){
   if(uTouring>0.5){
-    float x=p3.x,y=p3.y,z=p3.z,w=p2.x,v=p2.y;
-    float q0=uTourN0.x*x+uTourN0.y*y+uTourN0.z*z+uTourN0b.x*w+uTourN0b.y*v - uSlabC;
-    float sq=q0*q0;
-    if(uNslice>1.5){
-      float q1=uTourN1.x*x+uTourN1.y*y+uTourN1.z*z+uTourN1b.x*w+uTourN1b.y*v;
-      sq+=q1*q1;
+    float sq=0.0;
+    for(int s=0;s<21;s++){
+      if(float(s)>=uNslice) break;
+      float q=s==0 ? -uSlabC : 0.0;
+      for(int k=0;k<24;k++){
+        if(float(k)>=uDim) break;
+        q+=uTourN[s*24+k]*p[k];
+      }
+      sq+=q*q;
     }
     return sqrt(sq)>uSlabH;
   }
   if(uDim>3.5){
-    if(abs(p2.x-uSlabC)>uSlabH) return true;
-    if(uDim>4.5 && abs(p2.y-uSlabC)>uSlabH) return true;
+    if(abs(p[3]-uSlabC)>uSlabH) return true;
+    if(uDim>4.5 && abs(p[4]-uSlabC)>uSlabH) return true;
   }
   return false;
 }
@@ -207,17 +228,17 @@ bool sliceCull(vec3 p3, vec2 p2){
 // ---- point shader (dots) ----
 const DOT_VS = `#version 300 es
 precision highp float;
-layout(location=0) in vec3 aPos3;
-layout(location=1) in vec2 aPos2;
-layout(location=2) in float aCol;
+${POSITION_INPUTS}
+layout(location=6) in float aCol;
 ${PROJ}
 uniform vec3 uPal[8];
 uniform float uOpacity;
 out vec4 vColor;
 void main(){
-  if(sliceCull(aPos3,aPos2)){gl_Position=vec4(2.0,2.0,2.0,1.0);gl_PointSize=0.0;vColor=vec4(0.0);return;}
+  float p[24];loadPosition(p);
+  if(sliceCull(p)){gl_Position=vec4(2.0,2.0,2.0,1.0);gl_PointSize=0.0;vColor=vec4(0.0);return;}
   float ps,pd; bool ok;
-  vec4 clip=proj(aPos3,aPos2,ps,pd,ok);
+  vec4 clip=proj(p,ps,pd,ok);
   if(!ok){gl_Position=vec4(2.0,2.0,2.0,1.0);gl_PointSize=0.0;vColor=vec4(0.0);return;}
   float ref=uFov/uDist;
   float r=clamp(uBase*ps/ref,0.5,7.0);
@@ -242,19 +263,19 @@ void main(){
 // ---- line shader (trails, links, marks, floor) ----
 const LINE_VS = `#version 300 es
 precision highp float;
-layout(location=0) in vec3 aPos3;
-layout(location=1) in vec2 aPos2;
-layout(location=2) in vec4 aColA;   // rgb + alpha
+${POSITION_INPUTS}
+layout(location=6) in vec4 aColA;
 ${PROJ}
 uniform float uOpacity;
 out vec4 vColor;
 void main(){
+  float p[24];loadPosition(p);
   float ps,pd; bool ok;
   // Always compute the real clip position; NEVER teleport culled verts (a
   // teleport drags a segment across the screen). Just zero the alpha so any
   // segment touching a culled vertex fades to invisible in place.
-  bool culled=sliceCull(aPos3,aPos2);
-  vec4 clip=proj(aPos3,aPos2,ps,pd,ok);
+  bool culled=sliceCull(p);
+  vec4 clip=proj(p,ps,pd,ok);
   if(!ok||culled){ gl_Position=clip; vColor=vec4(0.0,0.0,0.0,0.0); return; }
   gl_Position=clip;
   vColor=vec4(aColA.rgb,aColA.a*uOpacity);
@@ -268,6 +289,24 @@ void main(){ outColor=vColor; }`;
 
 // ---- GL boot ----
 const E = i => document.getElementById(i);
+
+async function loadBuildVersion(){
+  try{
+    const response=await fetch('./version.json',{cache:'no-store'});
+    if(!response.ok)throw new Error(`HTTP ${response.status}`);
+    const display=formatBuildVersion(await response.json());
+    if(!display)throw new Error('invalid metadata');
+    const element=E('app-version');
+    element.textContent=display.label;
+    element.title=display.description;
+    element.setAttribute('aria-label',display.description);
+    element.hidden=false;
+  }catch(error){
+    console.warn(`Build version unavailable: ${error.message}`);
+  }
+}
+
+loadBuildVersion();
 const cv = E('c');
 let gl=null, dotProg=null, lineProg=null, flock=null, running=true;
 let posBuf=null, colBuf=null, dotVao=null;
@@ -312,8 +351,7 @@ function size(){
 const UNIF_NAMES=['uSy','uCy','uSp','uCp','uDist','uFov','uHalf','uCx','uCyC','uCz',
   'uSinA','uCosA','uSinB','uCosB','uSinC','uCosC','uIsoC','uIsoS','uSlabH','uSlabC',
   'uTouring','uDim','uW','uH','uNslice','uFog','uWp','uIso','uBase','uRound'];
-const UNIF_VEC=[['uTourF0',3],['uTourF0b',2],['uTourF1',3],['uTourF1b',2],['uTourF2',3],['uTourF2b',2],
-  ['uTourN0',3],['uTourN0b',2],['uTourN1',3],['uTourN1b',2]];
+const UNIF_ARRAYS=[['uTourF',30,72],['uTourN',102,504]];
 const uniLocCache=new Map();
 function U(prog,name){
   let m=uniLocCache.get(prog);
@@ -324,17 +362,11 @@ function U(prog,name){
 }
 function buildUniformSetter(prog){
   const scalars=UNIF_NAMES.map((name,i)=>({loc:U(prog,name),i}));
-  const vecs=UNIF_VEC.map(([name,size],j)=>{
-    let off=30;for(let k=0;k<j;k++)off+=UNIF_VEC[k][1];
-    return {loc:U(prog,name),size,off};
-  });
+  const arrays=UNIF_ARRAYS.map(([name,off,len])=>({loc:U(prog,name+'[0]'),off,len}));
   return u=>{
     gl.useProgram(prog);
     for(const s of scalars)gl.uniform1f(s.loc,u[s.i]);
-    for(const v of vecs){
-      if(v.size===3)gl.uniform3f(v.loc,u[v.off],u[v.off+1],u[v.off+2]);
-      else gl.uniform2f(v.loc,u[v.off],u[v.off+1]);
-    }
+    for(const a of arrays)gl.uniform1fv(a.loc,u.subarray(a.off,a.off+a.len));
   };
 }
 let setDotUniforms=null,setLineUniforms=null;
@@ -392,21 +424,35 @@ function ensureBufferSize(buf,bytes){
   if((buf._size||0)<bytes){gl.bufferData(gl.ARRAY_BUFFER,bytes,gl.DYNAMIC_DRAW);buf._size=bytes;}
 }
 
+const MAX_POSITION_ATTRS=6;
+function bindPositionAttributes(dim){
+  const stride=dim*4;
+  for(let attr=0;attr<MAX_POSITION_ATTRS;attr++){
+    const offset=attr*4;
+    if(offset<dim){
+      gl.enableVertexAttribArray(attr);
+      gl.vertexAttribPointer(attr,Math.min(4,dim-offset),gl.FLOAT,false,stride,offset*4);
+    }else{
+      gl.disableVertexAttribArray(attr);
+      gl.vertexAttrib4f(attr,0,0,0,0);
+    }
+  }
+}
+
 function uploadDots(){
   flock.repack_positions();
   posView=f32view(flock.positions_ptr(),flock.positions_len());
   gl.bindVertexArray(dotVao);
   ensureBufferSize(posBuf,posView.byteLength);
   gl.bufferSubData(gl.ARRAY_BUFFER,0,posView);
-  gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0,3,gl.FLOAT,false,20,0);
-  gl.enableVertexAttribArray(1); gl.vertexAttribPointer(1,2,gl.FLOAT,false,20,12);
+  bindPositionAttributes(flock.dim());
   if(flock.sync_colors()||colView===null){
     colView=u8view(flock.colors_ptr(),flock.colors_len());
     ensureBufferSize(colBuf,colView.byteLength);
     gl.bufferSubData(gl.ARRAY_BUFFER,0,colView);
   }
   gl.bindBuffer(gl.ARRAY_BUFFER,colBuf);
-  gl.enableVertexAttribArray(2); gl.vertexAttribPointer(2,1,gl.UNSIGNED_BYTE,false,0,0);
+  gl.enableVertexAttribArray(6); gl.vertexAttribPointer(6,1,gl.UNSIGNED_BYTE,false,0,0);
   gl.bindVertexArray(null);
 }
 
@@ -426,7 +472,7 @@ function resetTrailAdaptation(resetQuality){
 }
 
 function trailBudget(){
-  const {selected,effective,ceiling}=calculateTrailBudget(flock.n(),trailQuality,flock.trail_slots());
+  const {selected,effective,ceiling}=calculateTrailBudget(flock.n(),trailQuality,flock.trail_slots(),flock.dim());
   trailEffective=effective;
   trailCeiling=ceiling;
   return selected;
@@ -436,16 +482,16 @@ function buildTrails(){
   if(!P.trails){trailEffective=0;return 0;}
   const count=flock.build_trail_geometry(palFloats(colMode),palLen(colMode),trailBudget());
   if(count===0) return 0;
-  const verts=f32view(flock.trail_verts_ptr(),count*5);
+  const dim=flock.dim();
+  const verts=f32view(flock.trail_verts_ptr(),count*dim);
   const vc=f32view(flock.trail_cols_ptr(),count*4);
   gl.bindVertexArray(trailVao);
   ensureBufferSize(trailPosBuf,verts.byteLength);
   gl.bufferSubData(gl.ARRAY_BUFFER,0,verts);
-  gl.enableVertexAttribArray(0);gl.vertexAttribPointer(0,3,gl.FLOAT,false,20,0);
-  gl.enableVertexAttribArray(1);gl.vertexAttribPointer(1,2,gl.FLOAT,false,20,12);
+  bindPositionAttributes(dim);
   ensureBufferSize(trailColBuf,vc.byteLength);
   gl.bufferSubData(gl.ARRAY_BUFFER,0,vc);
-  gl.enableVertexAttribArray(2);gl.vertexAttribPointer(2,4,gl.FLOAT,false,0,0);
+  gl.enableVertexAttribArray(6);gl.vertexAttribPointer(6,4,gl.FLOAT,false,0,0);
   gl.bindVertexArray(null);
   return count;
 }
@@ -459,6 +505,7 @@ function buildLines(){
   const [sr,sg,sb]=hexToRgb(SAGE);
   const [cr,cg,cb]=hexToRgb(CORAL);
   const n=flock.n();
+  const dim=flock.dim();
 
   // links subsample so n=10000 doesn't push 20k edges through the CPU
   const linkStride=Math.ceil(n/1200);
@@ -466,15 +513,20 @@ function buildLines(){
   const floorEdges=(P.shadow&&dimVal===3)?20:0;
   const totalVerts=linkEdges*2+floorEdges*2;
 
-  if(!lineVertsScratch||lineVertsScratch.length<totalVerts*5){
-    lineVertsScratch=new Float32Array(Math.max(1,totalVerts)*5);
+  if(!lineVertsScratch||lineVertsScratch.length<totalVerts*dim){
+    lineVertsScratch=new Float32Array(Math.max(1,totalVerts)*dim);
     lineColsScratch=new Float32Array(Math.max(1,totalVerts)*4);
   }
   const verts=lineVertsScratch, vc=lineColsScratch;
   let vp=0,cp=0;
-  const pushV=(x,y,z,w,v,r,g,b,a)=>{
-    verts[vp]=x;verts[vp+1]=y;verts[vp+2]=z;verts[vp+3]=w;verts[vp+4]=v;
-    vc[cp]=r;vc[cp+1]=g;vc[cp+2]=b;vc[cp+3]=a;vp+=5;cp+=4;
+  const pushFrom=(positions,offset,r,g,b,a)=>{
+    for(let k=0;k<dim;k++)verts[vp+k]=positions[offset+k];
+    vp+=dim;
+    vc[cp]=r;vc[cp+1]=g;vc[cp+2]=b;vc[cp+3]=a;cp+=4;
+  };
+  const pushFloor=(x,y,z,r,g,b,a)=>{
+    verts[vp]=x;verts[vp+1]=y;verts[vp+2]=z;vp+=dim;
+    vc[cp]=r;vc[cp+1]=g;vc[cp+2]=b;vc[cp+3]=a;cp+=4;
   };
 
   if(P.links){
@@ -483,11 +535,9 @@ function buildLines(){
     const la=n>2000?0.05:n>500?0.09:0.16;
     for(let i=0;i<n;i+=linkStride){
       const f=fr[i], e=en[i];
-      const io=i*5, fo=f*5, eo=e*5;
-      pushV(pos[io],pos[io+1],pos[io+2],pos[io+3],pos[io+4], sr,sg,sb,la);
-      pushV(pos[fo],pos[fo+1],pos[fo+2],pos[fo+3],pos[fo+4], sr,sg,sb,la);
-      pushV(pos[io],pos[io+1],pos[io+2],pos[io+3],pos[io+4], cr,cg,cb,la);
-      pushV(pos[eo],pos[eo+1],pos[eo+2],pos[eo+3],pos[eo+4], cr,cg,cb,la);
+      const io=i*dim, fo=f*dim, eo=e*dim;
+      pushFrom(pos,io,sr,sg,sb,la);pushFrom(pos,fo,sr,sg,sb,la);
+      pushFrom(pos,io,cr,cg,cb,la);pushFrom(pos,eo,cr,cg,cb,la);
     }
   }
 
@@ -495,22 +545,21 @@ function buildLines(){
     const ga=0.35;
     for(let g=-2;g<=2;g++){
       const u=g*0.25;
-      pushV(u,0.5,-0.5,0,0, rr,rg,rb,ga); pushV(u,0.5,0.5,0,0, rr,rg,rb,ga);
-      pushV(-0.5,0.5,u,0,0, rr,rg,rb,ga); pushV(0.5,0.5,u,0,0, rr,rg,rb,ga);
+      pushFloor(u,0.5,-0.5,rr,rg,rb,ga);pushFloor(u,0.5,0.5,rr,rg,rb,ga);
+      pushFloor(-0.5,0.5,u,rr,rg,rb,ga);pushFloor(0.5,0.5,u,rr,rg,rb,ga);
     }
   }
-  return {verts:verts.subarray(0,vp), cols:vc.subarray(0,cp), count:vp/5};
+  return {verts:verts.subarray(0,vp), cols:vc.subarray(0,cp), count:vp/dim};
 }
 
 function uploadLines(L){
   gl.bindVertexArray(lineVao);
   ensureBufferSize(linePosBuf,L.verts.byteLength);
   gl.bufferSubData(gl.ARRAY_BUFFER,0,L.verts);
-  gl.enableVertexAttribArray(0);gl.vertexAttribPointer(0,3,gl.FLOAT,false,20,0);
-  gl.enableVertexAttribArray(1);gl.vertexAttribPointer(1,2,gl.FLOAT,false,20,12);
+  bindPositionAttributes(flock.dim());
   ensureBufferSize(lineColBuf,L.cols.byteLength);
   gl.bufferSubData(gl.ARRAY_BUFFER,0,L.cols);
-  gl.enableVertexAttribArray(2);gl.vertexAttribPointer(2,4,gl.FLOAT,false,0,0);
+  gl.enableVertexAttribArray(6);gl.vertexAttribPointer(6,4,gl.FLOAT,false,0,0);
   gl.bindVertexArray(null);
 }
 
@@ -637,11 +686,22 @@ function setLaw(prop){
 
 function setDim(d){
   dimVal=d;
-  ['d-2','d-3','d-4','d-5'].forEach((id,idx)=>E(id).setAttribute('aria-pressed',idx+2===d));
-  E('wgroup').style.display=d>=4?'flex':'none';
-  E('vrow').style.display=d>=5?'flex':'none';
+  for(const value of [2,3,4,5,8,24])E('d-'+value).setAttribute('aria-pressed',value===d);
+  const high=d>5;
+  E('wgroup').style.display=d>=4&&!high?'flex':'none';
+  E('vrow').style.display=d>=5&&!high?'flex':'none';
+  E('low-dim-note').hidden=high;
+  E('high-dim-note').hidden=!high;
+  const dots=E('s-dots');
+  const maxPosition=maxPopulationSliderValue(+E('s-trail-length').value,d);
+  const populationClamped=+dots.value>maxPosition;
+  if(populationClamped)dots.value=maxPosition;
   flock.set_dim(d);
+  if(populationClamped)flock.set_n(dotsFor(+dots.value));
+  if(high){E('k-tour').checked=true;flock.set_tour(true);}
   refreshViews();
+  uploadDots();
+  E('v-dots').textContent=flock.n();
   if(d===2){E('k-spin').checked=false;flock.set_spin(false);}
   labels();legend();
 }
@@ -681,7 +741,7 @@ function wire(){
 
   let dotsTimer=0,trailLengthTimer=0;
   E('s-dots').addEventListener('input',e=>{
-    const maxPosition=maxPopulationSliderValue(+E('s-trail-length').value);
+    const maxPosition=maxPopulationSliderValue(+E('s-trail-length').value,dimVal);
     if(+e.target.value>maxPosition)e.target.value=maxPosition;
     const want=dotsFor(+e.target.value);
     E('v-dots').textContent=want;
@@ -696,7 +756,7 @@ function wire(){
   E('s-trail-length').addEventListener('input',e=>{
     const length=+e.target.value;
     const dots=E('s-dots');
-    const maxPosition=maxPopulationSliderValue(length);
+    const maxPosition=maxPopulationSliderValue(length,dimVal);
     if(+dots.value>maxPosition){
       dots.value=maxPosition;
       E('v-dots').textContent=dotsFor(maxPosition);
@@ -705,7 +765,7 @@ function wire(){
     clearTimeout(dotsTimer);
     clearTimeout(trailLengthTimer);
     trailLengthTimer=setTimeout(()=>{
-      const safePopulation=maxPopulationForTrailLength(length);
+      const safePopulation=maxPopulationForTrailLength(length,dimVal);
       if(flock.n()>safePopulation){
         flock.set_n(dotsFor(+dots.value));
       }
@@ -721,6 +781,8 @@ function wire(){
   E('d-3').onclick=()=>setDim(3);
   E('d-4').onclick=()=>setDim(4);
   E('d-5').onclick=()=>setDim(5);
+  E('d-8').onclick=()=>setDim(8);
+  E('d-24').onclick=()=>setDim(24);
 
   E('k-fit').onchange=e=>flock.set_fit(e.target.checked);
   E('k-trail').onchange=e=>{P.trails=e.target.checked;resetTrailAdaptation(e.target.checked);readout();};
@@ -765,15 +827,39 @@ function wire(){
     if(e.key==='h'||e.key==='H')togglePanel();
   });
 
-  // drag orbit + wheel zoom
-  let dragging=false,lx=0,ly=0;
-  cv.addEventListener('pointerdown',e=>{dragging=true;lx=e.clientX;ly=e.clientY;cv.classList.add('dragging');cv.setPointerCapture(e.pointerId);});
-  cv.addEventListener('pointerup',e=>{dragging=false;cv.classList.remove('dragging');try{cv.releasePointerCapture(e.pointerId);}catch(_){}});
-  cv.addEventListener('pointermove',e=>{
-    if(!dragging)return;
-    flock.orbit(e.clientX-lx,e.clientY-ly);
-    lx=e.clientX;ly=e.clientY;
+  // One pointer orbits; two pointers pinch to zoom.
+  const pointers=new Map();
+  let pinchDistance=0;
+  const distance=()=>{
+    const [a,b]=[...pointers.values()];
+    return a&&b?Math.hypot(a.x-b.x,a.y-b.y):0;
+  };
+  cv.addEventListener('pointerdown',e=>{
+    pointers.set(e.pointerId,{x:e.clientX,y:e.clientY});
+    if(pointers.size===2)pinchDistance=distance();
+    cv.classList.add('dragging');
+    cv.setPointerCapture(e.pointerId);
   });
+  cv.addEventListener('pointermove',e=>{
+    const previous=pointers.get(e.pointerId);
+    if(!previous)return;
+    pointers.set(e.pointerId,{x:e.clientX,y:e.clientY});
+    if(pointers.size>=2){
+      const nextDistance=distance();
+      if(pinchDistance>0)flock.set_zoom(flock.zoom()*nextDistance/pinchDistance);
+      pinchDistance=nextDistance;
+    }else{
+      flock.orbit(e.clientX-previous.x,e.clientY-previous.y);
+    }
+  });
+  const releasePointer=e=>{
+    pointers.delete(e.pointerId);
+    pinchDistance=0;
+    if(pointers.size===0)cv.classList.remove('dragging');
+    try{cv.releasePointerCapture(e.pointerId);}catch(_){}
+  };
+  cv.addEventListener('pointerup',releasePointer);
+  cv.addEventListener('pointercancel',releasePointer);
   cv.addEventListener('wheel',e=>{
     e.preventDefault();
     flock.set_zoom(flock.zoom()*Math.exp(-e.deltaY*0.0012));

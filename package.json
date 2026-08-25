@@ -2,14 +2,17 @@
   "name": "flocking",
   "description": "A real-time friend-and-enemy swarm simulation for WebGL2 and WebAssembly.",
   "private": true,
-  "version": "0.1.11",
+  "version": "0.1.12",
   "engines": {
     "node": ">=22.0.0"
   },
   "scripts": {
     "dev": "trunk serve",
     "build": "trunk build --release",
-    "test:js": "node --test trail-quality.test.mjs",
+    "test:js": "node --test trail-quality.test.mjs versioning.test.mjs",
+    "version:check": "node scripts/check-version.mjs",
+    "verify": "cargo test && npm run test:js && npm run version:check",
+    "release": "node scripts/release.mjs",
     "deploy": "npm run build && wrangler deploy",
     "deploy:env": "set -a && . ./.env && set +a && npm run build && wrangler deploy",
     "cf:dev": "npm run build && wrangler dev"

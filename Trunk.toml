@@ -1,6 +1,11 @@
 [build]
 target = "index.html"
 
+[[hooks]]
+stage = "post_build"
+command = "node"
+command_arguments = ["scripts/write-build-version.mjs"]
+
 [serve]
 port = 8080
 open = false

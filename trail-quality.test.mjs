@@ -24,6 +24,8 @@ test('trail length limits population within the history memory budget', () => {
       assert.ok(populationForSliderValue(position + 1) > maxPopulationForTrailLength(frames));
     }
   }
+
+  assert.equal(maxPopulationForTrailLength(30, 24), 93_206);
 });
 
 test('trail budget starts complete and respects the geometry ceiling', () => {
@@ -42,6 +44,10 @@ test('trail budget starts complete and respects the geometry ceiling', () => {
   assert.equal(large.selected, 64_280);
   assert.equal(large.effective, 0.06428);
   assert.equal(large.ceiling, 0.06428);
+
+  const highDimensional = calculateTrailBudget(1_000_000, 1, 30, 24);
+  assert.ok(highDimensional.selected < large.selected);
+  assert.equal(highDimensional.selected, 20_661);
 });
 
 test('quality controller reduces, holds, restores, and reaches zero', () => {
